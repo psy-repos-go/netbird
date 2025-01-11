@@ -5,29 +5,26 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	sync2 "sync"
 	"time"
 
-	"github.com/netbirdio/netbird/management/server/activity"
-
-	"google.golang.org/grpc/credentials/insecure"
-
-	"github.com/netbirdio/netbird/management/server"
-
 	pb "github.com/golang/protobuf/proto" //nolint
-	log "github.com/sirupsen/logrus"
-
-	"github.com/netbirdio/netbird/encryption"
-
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/netbirdio/netbird/encryption"
 	mgmtProto "github.com/netbirdio/netbird/management/proto"
+	"github.com/netbirdio/netbird/management/server"
+	"github.com/netbirdio/netbird/management/server/activity"
+	"github.com/netbirdio/netbird/management/server/settings"
+	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/management/server/telemetry"
 	"github.com/netbirdio/netbird/util"
 )
 
@@ -53,8 +50,6 @@ var _ = Describe("Management service", func() {
 		dataDir, err = os.MkdirTemp("", "wiretrustee_mgmt_test_tmp_*")
 		Expect(err).NotTo(HaveOccurred())
 
-		err = util.CopyFileContents("testdata/store.json", filepath.Join(dataDir, "store.json"))
-		Expect(err).NotTo(HaveOccurred())
 		var listener net.Listener
 
 		config := &server.Config{}
@@ -62,7 +57,7 @@ var _ = Describe("Management service", func() {
 		Expect(err).NotTo(HaveOccurred())
 		config.Datadir = dataDir
 
-		s, listener = startServer(config)
+		s, listener = startServer(config, dataDir, "testdata/store.sql")
 		addr = listener.Addr().String()
 		client, conn = createRawClient(addr)
 
@@ -95,7 +90,8 @@ var _ = Describe("Management service", func() {
 				key, _ := wgtypes.GenerateKey()
 				loginPeerWithValidSetupKey(serverPubKey, key, client)
 
-				encryptedBytes, err := encryption.EncryptMessage(serverPubKey, key, &mgmtProto.SyncRequest{})
+				syncReq := &mgmtProto.SyncRequest{Meta: &mgmtProto.PeerSystemMeta{}}
+				encryptedBytes, err := encryption.EncryptMessage(serverPubKey, key, syncReq)
 				Expect(err).NotTo(HaveOccurred())
 
 				sync, err := client.Sync(context.TODO(), &mgmtProto.EncryptedMessage{
@@ -145,7 +141,7 @@ var _ = Describe("Management service", func() {
 				loginPeerWithValidSetupKey(serverPubKey, key1, client)
 				loginPeerWithValidSetupKey(serverPubKey, key2, client)
 
-				messageBytes, err := pb.Marshal(&mgmtProto.SyncRequest{})
+				messageBytes, err := pb.Marshal(&mgmtProto.SyncRequest{Meta: &mgmtProto.PeerSystemMeta{}})
 				Expect(err).NotTo(HaveOccurred())
 				encryptedBytes, err := encryption.Encrypt(messageBytes, serverPubKey, key)
 				Expect(err).NotTo(HaveOccurred())
@@ -178,7 +174,7 @@ var _ = Describe("Management service", func() {
 				key, _ := wgtypes.GenerateKey()
 				loginPeerWithValidSetupKey(serverPubKey, key, client)
 
-				messageBytes, err := pb.Marshal(&mgmtProto.SyncRequest{})
+				messageBytes, err := pb.Marshal(&mgmtProto.SyncRequest{Meta: &mgmtProto.PeerSystemMeta{}})
 				Expect(err).NotTo(HaveOccurred())
 				encryptedBytes, err := encryption.Encrypt(messageBytes, serverPubKey, key)
 				Expect(err).NotTo(HaveOccurred())
@@ -331,7 +327,7 @@ var _ = Describe("Management service", func() {
 
 				var clients []mgmtProto.ManagementService_SyncClient
 				for _, peer := range peers {
-					messageBytes, err := pb.Marshal(&mgmtProto.SyncRequest{})
+					messageBytes, err := pb.Marshal(&mgmtProto.SyncRequest{Meta: &mgmtProto.PeerSystemMeta{}})
 					Expect(err).NotTo(HaveOccurred())
 					encryptedBytes, err := encryption.Encrypt(messageBytes, serverPubKey, peer)
 					Expect(err).NotTo(HaveOccurred())
@@ -396,7 +392,8 @@ var _ = Describe("Management service", func() {
 					defer GinkgoRecover()
 					key, _ := wgtypes.GenerateKey()
 					loginPeerWithValidSetupKey(serverPubKey, key, client)
-					encryptedBytes, err := encryption.EncryptMessage(serverPubKey, key, &mgmtProto.SyncRequest{})
+					syncReq := &mgmtProto.SyncRequest{Meta: &mgmtProto.PeerSystemMeta{}}
+					encryptedBytes, err := encryption.EncryptMessage(serverPubKey, key, syncReq)
 					Expect(err).NotTo(HaveOccurred())
 
 					// open stream
@@ -492,24 +489,31 @@ func createRawClient(addr string) (mgmtProto.ManagementServiceClient, *grpc.Clie
 	return mgmtProto.NewManagementServiceClient(conn), conn
 }
 
-func startServer(config *server.Config) (*grpc.Server, net.Listener) {
+func startServer(config *server.Config, dataDir string, testFile string) (*grpc.Server, net.Listener) {
 	lis, err := net.Listen("tcp", ":0")
 	Expect(err).NotTo(HaveOccurred())
 	s := grpc.NewServer()
 
-	store, err := server.NewStoreFromJson(config.Datadir, nil)
+	store, _, err := store.NewTestStoreFromSQL(context.Background(), testFile, dataDir)
 	if err != nil {
 		log.Fatalf("failed creating a store: %s: %v", config.Datadir, err)
 	}
+
 	peersUpdateManager := server.NewPeersUpdateManager(nil)
 	eventStore := &activity.InMemoryEventStore{}
-	accountManager, err := server.BuildManager(store, peersUpdateManager, nil, "", "",
-		eventStore, false)
+
+	metrics, err := telemetry.NewDefaultAppMetrics(context.Background())
+	if err != nil {
+		log.Fatalf("failed creating metrics: %v", err)
+	}
+
+	accountManager, err := server.BuildManager(context.Background(), store, peersUpdateManager, nil, "", "netbird.selfhosted", eventStore, nil, false, server.MocIntegratedValidator{}, metrics)
 	if err != nil {
 		log.Fatalf("failed creating a manager: %v", err)
 	}
-	turnManager := server.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig)
-	mgmtServer, err := server.NewServer(config, accountManager, peersUpdateManager, turnManager, nil, nil)
+
+	secretsManager := server.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig, config.Relay)
+	mgmtServer, err := server.NewServer(context.Background(), config, accountManager, settings.NewManager(store), peersUpdateManager, secretsManager, nil, nil)
 	Expect(err).NotTo(HaveOccurred())
 	mgmtProto.RegisterManagementServiceServer(s, mgmtServer)
 	go func() {

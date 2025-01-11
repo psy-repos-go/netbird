@@ -2,6 +2,7 @@ syntax = "proto3";
 
 import "google/protobuf/descriptor.proto";
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 
 option go_package = "/proto";
 
@@ -26,14 +27,46 @@ service DaemonService {
 
   // GetConfig of the daemon.
   rpc GetConfig(GetConfigRequest) returns (GetConfigResponse) {}
-};
+
+  // List available networks
+  rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse) {}
+
+  // Select specific routes
+  rpc SelectNetworks(SelectNetworksRequest) returns (SelectNetworksResponse) {}
+
+  // Deselect specific routes
+  rpc DeselectNetworks(SelectNetworksRequest) returns (SelectNetworksResponse) {}
+
+  // DebugBundle creates a debug bundle
+  rpc DebugBundle(DebugBundleRequest) returns (DebugBundleResponse) {}
+
+  // GetLogLevel gets the log level of the daemon
+  rpc GetLogLevel(GetLogLevelRequest) returns (GetLogLevelResponse) {}
+
+  // SetLogLevel sets the log level of the daemon
+  rpc SetLogLevel(SetLogLevelRequest) returns (SetLogLevelResponse) {}
+
+  // List all states
+  rpc ListStates(ListStatesRequest) returns (ListStatesResponse) {}
+
+  // Clean specific state or all states
+  rpc CleanState(CleanStateRequest) returns (CleanStateResponse) {}
+
+  // Delete specific state or all states
+  rpc DeleteState(DeleteStateRequest) returns (DeleteStateResponse) {}
+
+  // SetNetworkMapPersistence enables or disables network map persistence
+  rpc SetNetworkMapPersistence(SetNetworkMapPersistenceRequest) returns (SetNetworkMapPersistenceResponse) {}
+}
+
 
 message LoginRequest {
   // setupKey wiretrustee setup key.
   string setupKey = 1;
 
-  // preSharedKey for wireguard setup.
-  string preSharedKey = 2;
+  // This is the old PreSharedKey field which will be deprecated in favor of optionalPreSharedKey field that is defined as optional
+  // to allow clearing of preshared key while being able to persist in the config file.
+  string preSharedKey = 2 [deprecated = true];
 
   // managementUrl to authenticate.
   string managementUrl = 3;
@@ -54,6 +87,31 @@ message LoginRequest {
   bool isLinuxDesktopClient = 8;
 
   string hostname = 9;
+
+  optional bool rosenpassEnabled = 10;
+
+  optional string interfaceName = 11;
+
+  optional int64 wireguardPort = 12;
+
+  optional string optionalPreSharedKey = 13;
+
+  optional bool disableAutoConnect = 14;
+
+  optional bool serverSSHAllowed = 15;
+
+  optional bool rosenpassPermissive = 16;
+
+  repeated string extraIFaceBlacklist = 17;
+
+  optional bool networkMonitor = 18;
+
+  optional google.protobuf.Duration dnsRouteInterval = 19;
+
+  optional bool disable_client_routes = 20;
+  optional bool disable_server_routes = 21;
+  optional bool disable_dns = 22;
+  optional bool disable_firewall = 23;
 }
 
 message LoginResponse {
@@ -107,6 +165,18 @@ message GetConfigResponse {
 
   // adminURL settings value.
   string adminURL = 5;
+
+  string interfaceName = 6;
+
+  int64 wireguardPort = 7;
+
+  bool disableAutoConnect = 9;
+
+  bool serverSSHAllowed = 10;
+
+  bool rosenpassEnabled = 11;
+
+  bool rosenpassPermissive = 12;
 }
 
 // PeerState contains the latest state of a peer
@@ -116,35 +186,171 @@ message PeerState {
   string connStatus = 3;
   google.protobuf.Timestamp connStatusUpdate = 4;
   bool relayed = 5;
-  bool direct = 6;
   string localIceCandidateType = 7;
-  string remoteIceCandidateType =8;
+  string remoteIceCandidateType = 8;
   string fqdn = 9;
+  string localIceCandidateEndpoint = 10;
+  string remoteIceCandidateEndpoint = 11;
+  google.protobuf.Timestamp lastWireguardHandshake = 12;
+  int64 bytesRx = 13;
+  int64 bytesTx = 14;
+  bool rosenpassEnabled = 15;
+  repeated string networks = 16;
+  google.protobuf.Duration latency = 17;
+  string relayAddress = 18;
 }
 
 // LocalPeerState contains the latest state of the local peer
 message LocalPeerState {
   string IP = 1;
   string pubKey = 2;
-  bool  kernelInterface =3;
+  bool  kernelInterface = 3;
   string fqdn = 4;
+  bool rosenpassEnabled = 5;
+  bool rosenpassPermissive = 6;
+  repeated string networks = 7;
 }
 
 // SignalState contains the latest state of a signal connection
 message SignalState {
   string URL = 1;
   bool connected = 2;
+  string error = 3;
 }
 
 // ManagementState contains the latest state of a management connection
 message ManagementState {
   string URL = 1;
   bool connected = 2;
+  string error = 3;
 }
+
+// RelayState contains the latest state of the relay
+message RelayState {
+  string URI = 1;
+  bool available = 2;
+  string error = 3;
+}
+
+message NSGroupState {
+  repeated string servers = 1;
+  repeated string domains = 2;
+  bool enabled = 3;
+  string error = 4;
+}
+
 // FullStatus contains the full state held by the Status instance
 message FullStatus {
-    ManagementState managementState = 1;
-    SignalState     signalState = 2;
-    LocalPeerState  localPeerState = 3;
-    repeated PeerState peers = 4;
+  ManagementState managementState = 1;
+  SignalState     signalState = 2;
+  LocalPeerState  localPeerState = 3;
+  repeated PeerState peers = 4;
+  repeated RelayState relays = 5;
+  repeated NSGroupState dns_servers = 6;
 }
+
+message ListNetworksRequest {
+}
+
+message ListNetworksResponse {
+  repeated Network routes = 1;
+}
+
+message SelectNetworksRequest {
+  repeated string networkIDs = 1;
+  bool append = 2;
+  bool all = 3;
+}
+
+message SelectNetworksResponse {
+}
+
+message IPList {
+  repeated string ips = 1;
+}
+
+
+message Network {
+  string ID = 1;
+  string range = 2;
+  bool selected = 3;
+  repeated string domains = 4;
+  map<string, IPList> resolvedIPs = 5;
+}
+
+message DebugBundleRequest {
+  bool anonymize = 1;
+  string status = 2;
+  bool systemInfo = 3;
+}
+
+message DebugBundleResponse {
+  string path = 1;
+}
+
+enum LogLevel {
+  UNKNOWN = 0;
+  PANIC = 1;
+  FATAL = 2;
+  ERROR = 3;
+  WARN = 4;
+  INFO = 5;
+  DEBUG = 6;
+  TRACE = 7;
+}
+
+message GetLogLevelRequest {
+}
+
+message GetLogLevelResponse {
+  LogLevel level = 1;
+}
+
+message SetLogLevelRequest {
+  LogLevel level = 1;
+}
+
+message SetLogLevelResponse {
+}
+
+// State represents a daemon state entry
+message State {
+  string name = 1;
+}
+
+// ListStatesRequest is empty as it requires no parameters
+message ListStatesRequest {}
+
+// ListStatesResponse contains a list of states
+message ListStatesResponse {
+  repeated State states = 1;
+}
+
+// CleanStateRequest for cleaning states
+message CleanStateRequest {
+  string state_name = 1;
+  bool all = 2;
+}
+
+// CleanStateResponse contains the result of the clean operation
+message CleanStateResponse {
+  int32 cleaned_states = 1;
+}
+
+// DeleteStateRequest for deleting states
+message DeleteStateRequest {
+  string state_name = 1;
+  bool all = 2;
+}
+
+// DeleteStateResponse contains the result of the delete operation
+message DeleteStateResponse {
+  int32 deleted_states = 1;
+}
+
+
+message SetNetworkMapPersistenceRequest {
+  bool enabled = 1;
+}
+
+message SetNetworkMapPersistenceResponse {}

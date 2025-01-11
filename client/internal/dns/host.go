@@ -2,39 +2,48 @@ package dns
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
+	"github.com/netbirdio/netbird/client/internal/statemanager"
 	nbdns "github.com/netbirdio/netbird/dns"
 )
 
 type hostManager interface {
-	applyDNSConfig(config hostDNSConfig) error
+	applyDNSConfig(config HostDNSConfig, stateManager *statemanager.Manager) error
 	restoreHostDNS() error
 	supportCustomPort() bool
 }
 
-type hostDNSConfig struct {
-	domains    []domainConfig
-	routeAll   bool
-	serverIP   string
-	serverPort int
+type SystemDNSSettings struct {
+	Domains    []string
+	ServerIP   string
+	ServerPort int
 }
 
-type domainConfig struct {
-	disabled  bool
-	domain    string
-	matchOnly bool
+type HostDNSConfig struct {
+	Domains    []DomainConfig `json:"domains"`
+	RouteAll   bool           `json:"routeAll"`
+	ServerIP   string         `json:"serverIP"`
+	ServerPort int            `json:"serverPort"`
+}
+
+type DomainConfig struct {
+	Disabled  bool   `json:"disabled"`
+	Domain    string `json:"domain"`
+	MatchOnly bool   `json:"matchOnly"`
 }
 
 type mockHostConfigurator struct {
-	applyDNSConfigFunc    func(config hostDNSConfig) error
-	restoreHostDNSFunc    func() error
-	supportCustomPortFunc func() bool
+	applyDNSConfigFunc            func(config HostDNSConfig, stateManager *statemanager.Manager) error
+	restoreHostDNSFunc            func() error
+	supportCustomPortFunc         func() bool
+	restoreUncleanShutdownDNSFunc func(*netip.Addr) error
 }
 
-func (m *mockHostConfigurator) applyDNSConfig(config hostDNSConfig) error {
+func (m *mockHostConfigurator) applyDNSConfig(config HostDNSConfig, stateManager *statemanager.Manager) error {
 	if m.applyDNSConfigFunc != nil {
-		return m.applyDNSConfigFunc(config)
+		return m.applyDNSConfigFunc(config, stateManager)
 	}
 	return fmt.Errorf("method applyDNSSettings is not implemented")
 }
@@ -55,40 +64,55 @@ func (m *mockHostConfigurator) supportCustomPort() bool {
 
 func newNoopHostMocker() hostManager {
 	return &mockHostConfigurator{
-		applyDNSConfigFunc:    func(config hostDNSConfig) error { return nil },
-		restoreHostDNSFunc:    func() error { return nil },
-		supportCustomPortFunc: func() bool { return true },
+		applyDNSConfigFunc:            func(config HostDNSConfig, stateManager *statemanager.Manager) error { return nil },
+		restoreHostDNSFunc:            func() error { return nil },
+		supportCustomPortFunc:         func() bool { return true },
+		restoreUncleanShutdownDNSFunc: func(*netip.Addr) error { return nil },
 	}
 }
 
-func dnsConfigToHostDNSConfig(dnsConfig nbdns.Config, ip string, port int) hostDNSConfig {
-	config := hostDNSConfig{
-		routeAll:   false,
-		serverIP:   ip,
-		serverPort: port,
+func dnsConfigToHostDNSConfig(dnsConfig nbdns.Config, ip string, port int) HostDNSConfig {
+	config := HostDNSConfig{
+		RouteAll:   false,
+		ServerIP:   ip,
+		ServerPort: port,
 	}
 	for _, nsConfig := range dnsConfig.NameServerGroups {
 		if len(nsConfig.NameServers) == 0 {
 			continue
 		}
 		if nsConfig.Primary {
-			config.routeAll = true
+			config.RouteAll = true
 		}
 
 		for _, domain := range nsConfig.Domains {
-			config.domains = append(config.domains, domainConfig{
-				domain:    strings.TrimSuffix(domain, "."),
-				matchOnly: !nsConfig.SearchDomainsEnabled,
+			config.Domains = append(config.Domains, DomainConfig{
+				Domain:    strings.TrimSuffix(domain, "."),
+				MatchOnly: !nsConfig.SearchDomainsEnabled,
 			})
 		}
 	}
 
 	for _, customZone := range dnsConfig.CustomZones {
-		config.domains = append(config.domains, domainConfig{
-			domain:    strings.TrimSuffix(customZone.Domain, "."),
-			matchOnly: false,
+		config.Domains = append(config.Domains, DomainConfig{
+			Domain:    strings.TrimSuffix(customZone.Domain, "."),
+			MatchOnly: false,
 		})
 	}
 
 	return config
+}
+
+type noopHostConfigurator struct{}
+
+func (n noopHostConfigurator) applyDNSConfig(HostDNSConfig, *statemanager.Manager) error {
+	return nil
+}
+
+func (n noopHostConfigurator) restoreHostDNS() error {
+	return nil
+}
+
+func (n noopHostConfigurator) supportCustomPort() bool {
+	return true
 }

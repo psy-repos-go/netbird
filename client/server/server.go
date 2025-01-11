@@ -3,11 +3,16 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
-	"github.com/netbirdio/netbird/client/internal/auth"
-	"github.com/netbirdio/netbird/client/system"
+	"github.com/cenkalti/backoff/v4"
+	"golang.org/x/exp/maps"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -15,10 +20,27 @@ import (
 	gstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/netbirdio/netbird/client/internal/auth"
+	"github.com/netbirdio/netbird/client/system"
+
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/proto"
 	"github.com/netbirdio/netbird/version"
+)
+
+const (
+	probeThreshold          = time.Second * 5
+	retryInitialIntervalVar = "NB_CONN_RETRY_INTERVAL_TIME"
+	maxRetryIntervalVar     = "NB_CONN_MAX_RETRY_INTERVAL_TIME"
+	maxRetryTimeVar         = "NB_CONN_MAX_RETRY_TIME_TIME"
+	retryMultiplierVar      = "NB_CONN_RETRY_MULTIPLIER"
+	defaultInitialRetryTime = 30 * time.Minute
+	defaultMaxRetryInterval = 60 * time.Minute
+	defaultMaxRetryTime     = 14 * 24 * time.Hour
+	defaultRetryMultiplier  = 1.7
+
+	errRestoreResidualState = "failed to restore residual state: %v"
 )
 
 // Server for service control.
@@ -36,7 +58,18 @@ type Server struct {
 	config *internal.Config
 	proto.UnimplementedDaemonServiceServer
 
+	connectClient *internal.ConnectClient
+
 	statusRecorder *peer.Status
+	sessionWatcher *internal.SessionWatcher
+
+	mgmProbe    *internal.Probe
+	signalProbe *internal.Probe
+	relayProbe  *internal.Probe
+	wgProbe     *internal.Probe
+	lastProbe   time.Time
+
+	persistNetworkMap bool
 }
 
 type oauthAuthFlow struct {
@@ -53,7 +86,13 @@ func New(ctx context.Context, configPath, logFile string) *Server {
 		latestConfigInput: internal.ConfigInput{
 			ConfigPath: configPath,
 		},
-		logFile: logFile,
+		logFile:     logFile,
+		mgmProbe:    internal.NewProbe(),
+		signalProbe: internal.NewProbe(),
+		relayProbe:  internal.NewProbe(),
+		wgProbe:     internal.NewProbe(),
+
+		persistNetworkMap: true,
 	}
 }
 
@@ -61,6 +100,14 @@ func (s *Server) Start() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	state := internal.CtxGetState(s.rootCtx)
+
+	if err := handlePanicLog(); err != nil {
+		log.Warnf("failed to redirect stderr: %v", err)
+	}
+
+	if err := restoreResidualState(s.rootCtx); err != nil {
+		log.Warnf(errRestoreResidualState, err)
+	}
 
 	// if current state contains any error, return it
 	// in all other cases we can continue execution only if status is idle and up command was
@@ -94,23 +141,137 @@ func (s *Server) Start() error {
 	}
 
 	// if configuration exists, we just start connections.
-	config, _ = internal.UpdateOldManagementPort(ctx, config, s.latestConfigInput.ConfigPath)
+	config, _ = internal.UpdateOldManagementURL(ctx, config, s.latestConfigInput.ConfigPath)
 
 	s.config = config
 
 	if s.statusRecorder == nil {
 		s.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
-	} else {
-		s.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	}
+	s.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	s.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
+
+	if s.sessionWatcher == nil {
+		s.sessionWatcher = internal.NewSessionWatcher(s.rootCtx, s.statusRecorder)
+		s.sessionWatcher.SetOnExpireListener(s.onSessionExpire)
 	}
 
+	if config.DisableAutoConnect {
+		return nil
+	}
+
+	go s.connectWithRetryRuns(ctx, config, s.statusRecorder, nil)
+
+	return nil
+}
+
+// connectWithRetryRuns runs the client connection with a backoff strategy where we retry the operation as additional
+// mechanism to keep the client connected even when the connection is lost.
+// we cancel retry if the client receive a stop or down command, or if disable auto connect is configured.
+func (s *Server) connectWithRetryRuns(ctx context.Context, config *internal.Config, statusRecorder *peer.Status,
+	runningChan chan error,
+) {
+	backOff := getConnectWithBackoff(ctx)
+	retryStarted := false
+
 	go func() {
-		if err := internal.RunClient(ctx, config, s.statusRecorder); err != nil {
-			log.Errorf("init connections: %v", err)
+		t := time.NewTicker(24 * time.Hour)
+		for {
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+				if retryStarted {
+
+					mgmtState := statusRecorder.GetManagementState()
+					signalState := statusRecorder.GetSignalState()
+					if mgmtState.Connected && signalState.Connected {
+						log.Tracef("resetting status")
+						retryStarted = false
+					} else {
+						log.Tracef("not resetting status: mgmt: %v, signal: %v", mgmtState.Connected, signalState.Connected)
+					}
+				}
+			}
 		}
 	}()
 
-	return nil
+	runOperation := func() error {
+		log.Tracef("running client connection")
+		s.connectClient = internal.NewConnectClient(ctx, config, statusRecorder)
+		s.connectClient.SetNetworkMapPersistence(s.persistNetworkMap)
+
+		probes := internal.ProbeHolder{
+			MgmProbe:    s.mgmProbe,
+			SignalProbe: s.signalProbe,
+			RelayProbe:  s.relayProbe,
+			WgProbe:     s.wgProbe,
+		}
+
+		err := s.connectClient.RunWithProbes(&probes, runningChan)
+		if err != nil {
+			log.Debugf("run client connection exited with error: %v. Will retry in the background", err)
+		}
+
+		if config.DisableAutoConnect {
+			return backoff.Permanent(err)
+		}
+
+		if !retryStarted {
+			retryStarted = true
+			backOff.Reset()
+		}
+
+		log.Tracef("client connection exited")
+		return fmt.Errorf("client connection exited")
+	}
+
+	err := backoff.Retry(runOperation, backOff)
+	if s, ok := gstatus.FromError(err); ok && s.Code() != codes.Canceled {
+		log.Errorf("received an error when trying to connect: %v", err)
+	} else {
+		log.Tracef("retry canceled")
+	}
+}
+
+// getConnectWithBackoff returns a backoff with exponential backoff strategy for connection retries
+func getConnectWithBackoff(ctx context.Context) backoff.BackOff {
+	initialInterval := parseEnvDuration(retryInitialIntervalVar, defaultInitialRetryTime)
+	maxInterval := parseEnvDuration(maxRetryIntervalVar, defaultMaxRetryInterval)
+	maxElapsedTime := parseEnvDuration(maxRetryTimeVar, defaultMaxRetryTime)
+	multiplier := defaultRetryMultiplier
+
+	if envValue := os.Getenv(retryMultiplierVar); envValue != "" {
+		// parse the multiplier from the environment variable string value to float64
+		value, err := strconv.ParseFloat(envValue, 64)
+		if err != nil {
+			log.Warnf("unable to parse environment variable %s: %s. using default: %f", retryMultiplierVar, envValue, multiplier)
+		} else {
+			multiplier = value
+		}
+	}
+
+	return backoff.WithContext(&backoff.ExponentialBackOff{
+		InitialInterval:     initialInterval,
+		RandomizationFactor: 1,
+		Multiplier:          multiplier,
+		MaxInterval:         maxInterval,
+		MaxElapsedTime:      maxElapsedTime, // 14 days
+		Stop:                backoff.Stop,
+		Clock:               backoff.SystemClock,
+	}, ctx)
+}
+
+// parseEnvDuration parses the environment variable and returns the duration
+func parseEnvDuration(envVar string, defaultDuration time.Duration) time.Duration {
+	if envValue := os.Getenv(envVar); envValue != "" {
+		if duration, err := time.ParseDuration(envValue); err == nil {
+			return duration
+		}
+		log.Warnf("unable to parse environment variable %s: %s. using default: %s", envVar, envValue, defaultDuration)
+	}
+	return defaultDuration
 }
 
 // loginAttempt attempts to login using the provided information. it returns a status in case something fails
@@ -145,6 +306,10 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 
 	s.actCancel = cancel
 	s.mutex.Unlock()
+
+	if err := restoreResidualState(ctx); err != nil {
+		log.Warnf(errRestoreResidualState, err)
+	}
 
 	state := internal.CtxGetState(ctx)
 	defer func() {
@@ -187,9 +352,75 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		ctx = context.WithValue(ctx, system.DeviceNameCtxKey, msg.Hostname)
 	}
 
+	if msg.RosenpassEnabled != nil {
+		inputConfig.RosenpassEnabled = msg.RosenpassEnabled
+		s.latestConfigInput.RosenpassEnabled = msg.RosenpassEnabled
+	}
+
+	if msg.RosenpassPermissive != nil {
+		inputConfig.RosenpassPermissive = msg.RosenpassPermissive
+		s.latestConfigInput.RosenpassPermissive = msg.RosenpassPermissive
+	}
+
+	if msg.ServerSSHAllowed != nil {
+		inputConfig.ServerSSHAllowed = msg.ServerSSHAllowed
+		s.latestConfigInput.ServerSSHAllowed = msg.ServerSSHAllowed
+	}
+
+	if msg.DisableAutoConnect != nil {
+		inputConfig.DisableAutoConnect = msg.DisableAutoConnect
+		s.latestConfigInput.DisableAutoConnect = msg.DisableAutoConnect
+	}
+
+	if msg.InterfaceName != nil {
+		inputConfig.InterfaceName = msg.InterfaceName
+		s.latestConfigInput.InterfaceName = msg.InterfaceName
+	}
+
+	if msg.WireguardPort != nil {
+		port := int(*msg.WireguardPort)
+		inputConfig.WireguardPort = &port
+		s.latestConfigInput.WireguardPort = &port
+	}
+
+	if msg.NetworkMonitor != nil {
+		inputConfig.NetworkMonitor = msg.NetworkMonitor
+		s.latestConfigInput.NetworkMonitor = msg.NetworkMonitor
+	}
+
+	if len(msg.ExtraIFaceBlacklist) > 0 {
+		inputConfig.ExtraIFaceBlackList = msg.ExtraIFaceBlacklist
+		s.latestConfigInput.ExtraIFaceBlackList = msg.ExtraIFaceBlacklist
+	}
+
+	if msg.DnsRouteInterval != nil {
+		duration := msg.DnsRouteInterval.AsDuration()
+		inputConfig.DNSRouteInterval = &duration
+		s.latestConfigInput.DNSRouteInterval = &duration
+	}
+
+	if msg.DisableClientRoutes != nil {
+		inputConfig.DisableClientRoutes = msg.DisableClientRoutes
+		s.latestConfigInput.DisableClientRoutes = msg.DisableClientRoutes
+	}
+	if msg.DisableServerRoutes != nil {
+		inputConfig.DisableServerRoutes = msg.DisableServerRoutes
+		s.latestConfigInput.DisableServerRoutes = msg.DisableServerRoutes
+	}
+	if msg.DisableDns != nil {
+		inputConfig.DisableDNS = msg.DisableDns
+		s.latestConfigInput.DisableDNS = msg.DisableDns
+	}
+	if msg.DisableFirewall != nil {
+		inputConfig.DisableFirewall = msg.DisableFirewall
+		s.latestConfigInput.DisableFirewall = msg.DisableFirewall
+	}
+
 	s.mutex.Unlock()
 
-	inputConfig.PreSharedKey = &msg.PreSharedKey
+	if msg.OptionalPreSharedKey != nil {
+		inputConfig.PreSharedKey = msg.OptionalPreSharedKey
+	}
 
 	config, err := internal.UpdateOrCreateConfig(inputConfig)
 	if err != nil {
@@ -197,7 +428,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	}
 
 	if msg.ManagementUrl == "" {
-		config, _ = internal.UpdateOldManagementPort(ctx, config, s.latestConfigInput.ConfigPath)
+		config, _ = internal.UpdateOldManagementURL(ctx, config, s.latestConfigInput.ConfigPath)
 		s.config = config
 		s.latestConfigInput.ManagementURL = config.ManagementURL.String()
 	}
@@ -354,6 +585,10 @@ func (s *Server) Up(callerCtx context.Context, _ *proto.UpRequest) (*proto.UpRes
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	if err := restoreResidualState(callerCtx); err != nil {
+		log.Warnf(errRestoreResidualState, err)
+	}
+
 	state := internal.CtxGetState(s.rootCtx)
 
 	// if current state contains any error, return it
@@ -386,36 +621,55 @@ func (s *Server) Up(callerCtx context.Context, _ *proto.UpRequest) (*proto.UpRes
 
 	if s.statusRecorder == nil {
 		s.statusRecorder = peer.NewRecorder(s.config.ManagementURL.String())
-	} else {
-		s.statusRecorder.UpdateManagementAddress(s.config.ManagementURL.String())
 	}
+	s.statusRecorder.UpdateManagementAddress(s.config.ManagementURL.String())
+	s.statusRecorder.UpdateRosenpass(s.config.RosenpassEnabled, s.config.RosenpassPermissive)
 
-	go func() {
-		if err := internal.RunClient(ctx, s.config, s.statusRecorder); err != nil {
-			log.Errorf("run client connection: %v", err)
-			return
+	runningChan := make(chan error)
+	go s.connectWithRetryRuns(ctx, s.config, s.statusRecorder, runningChan)
+
+	for {
+		select {
+		case err := <-runningChan:
+			if err != nil {
+				log.Debugf("waiting for engine to become ready failed: %s", err)
+			} else {
+				return &proto.UpResponse{}, nil
+			}
+		case <-callerCtx.Done():
+			log.Debug("context done, stopping the wait for engine to become ready")
+			return nil, callerCtx.Err()
 		}
-	}()
-
-	return &proto.UpResponse{}, nil
+	}
 }
 
 // Down engine work in the daemon.
-func (s *Server) Down(_ context.Context, _ *proto.DownRequest) (*proto.DownResponse, error) {
+func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownResponse, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
+	s.oauthAuthFlow = oauthAuthFlow{}
 
 	if s.actCancel == nil {
 		return nil, fmt.Errorf("service is not up")
 	}
 	s.actCancel()
+
+	err := s.connectClient.Stop()
+	if err != nil {
+		log.Errorf("failed to shut down properly: %v", err)
+		return nil, err
+	}
+
 	state := internal.CtxGetState(s.rootCtx)
 	state.Set(internal.StatusIdle)
+
+	log.Infof("service is down")
 
 	return &proto.DownResponse{}, nil
 }
 
-// Status starts engine work in the daemon.
+// Status returns the daemon status
 func (s *Server) Status(
 	_ context.Context,
 	msg *proto.StatusRequest,
@@ -432,17 +686,33 @@ func (s *Server) Status(
 
 	if s.statusRecorder == nil {
 		s.statusRecorder = peer.NewRecorder(s.config.ManagementURL.String())
-	} else {
-		s.statusRecorder.UpdateManagementAddress(s.config.ManagementURL.String())
 	}
+	s.statusRecorder.UpdateManagementAddress(s.config.ManagementURL.String())
+	s.statusRecorder.UpdateRosenpass(s.config.RosenpassEnabled, s.config.RosenpassPermissive)
 
 	if msg.GetFullPeerStatus {
+		s.runProbes()
+
 		fullStatus := s.statusRecorder.GetFullStatus()
 		pbFullStatus := toProtoFullStatus(fullStatus)
 		statusResponse.FullStatus = pbFullStatus
 	}
 
 	return &statusResponse, nil
+}
+
+func (s *Server) runProbes() {
+	if time.Since(s.lastProbe) > probeThreshold {
+		managementHealthy := s.mgmProbe.Probe()
+		signalHealthy := s.signalProbe.Probe()
+		relayHealthy := s.relayProbe.Probe()
+		wgProbe := s.wgProbe.Probe()
+
+		// Update last time only if all probes were successful
+		if managementHealthy && signalHealthy && relayHealthy && wgProbe {
+			s.lastProbe = time.Now()
+		}
+	}
 }
 
 // GetConfig of the daemon.
@@ -471,12 +741,28 @@ func (s *Server) GetConfig(_ context.Context, _ *proto.GetConfigRequest) (*proto
 	}
 
 	return &proto.GetConfigResponse{
-		ManagementUrl: managementURL,
-		AdminURL:      adminURL,
-		ConfigFile:    s.latestConfigInput.ConfigPath,
-		LogFile:       s.logFile,
-		PreSharedKey:  preSharedKey,
+		ManagementUrl:       managementURL,
+		ConfigFile:          s.latestConfigInput.ConfigPath,
+		LogFile:             s.logFile,
+		PreSharedKey:        preSharedKey,
+		AdminURL:            adminURL,
+		InterfaceName:       s.config.WgIface,
+		WireguardPort:       int64(s.config.WgPort),
+		DisableAutoConnect:  s.config.DisableAutoConnect,
+		ServerSSHAllowed:    *s.config.ServerSSHAllowed,
+		RosenpassEnabled:    s.config.RosenpassEnabled,
+		RosenpassPermissive: s.config.RosenpassPermissive,
 	}, nil
+}
+func (s *Server) onSessionExpire() {
+	if runtime.GOOS != "windows" {
+		isUIActive := internal.CheckUIApp()
+		if !isUIActive {
+			if err := sendTerminalNotification(); err != nil {
+				log.Errorf("send session expire terminal notification: %v", err)
+			}
+		}
+	}
 }
 
 func toProtoFullStatus(fullStatus peer.FullStatus) *proto.FullStatus {
@@ -489,28 +775,99 @@ func toProtoFullStatus(fullStatus peer.FullStatus) *proto.FullStatus {
 
 	pbFullStatus.ManagementState.URL = fullStatus.ManagementState.URL
 	pbFullStatus.ManagementState.Connected = fullStatus.ManagementState.Connected
+	if err := fullStatus.ManagementState.Error; err != nil {
+		pbFullStatus.ManagementState.Error = err.Error()
+	}
 
 	pbFullStatus.SignalState.URL = fullStatus.SignalState.URL
 	pbFullStatus.SignalState.Connected = fullStatus.SignalState.Connected
+	if err := fullStatus.SignalState.Error; err != nil {
+		pbFullStatus.SignalState.Error = err.Error()
+	}
 
 	pbFullStatus.LocalPeerState.IP = fullStatus.LocalPeerState.IP
 	pbFullStatus.LocalPeerState.PubKey = fullStatus.LocalPeerState.PubKey
 	pbFullStatus.LocalPeerState.KernelInterface = fullStatus.LocalPeerState.KernelInterface
 	pbFullStatus.LocalPeerState.Fqdn = fullStatus.LocalPeerState.FQDN
+	pbFullStatus.LocalPeerState.RosenpassPermissive = fullStatus.RosenpassState.Permissive
+	pbFullStatus.LocalPeerState.RosenpassEnabled = fullStatus.RosenpassState.Enabled
+	pbFullStatus.LocalPeerState.Networks = maps.Keys(fullStatus.LocalPeerState.Routes)
 
 	for _, peerState := range fullStatus.Peers {
 		pbPeerState := &proto.PeerState{
-			IP:                     peerState.IP,
-			PubKey:                 peerState.PubKey,
-			ConnStatus:             peerState.ConnStatus.String(),
-			ConnStatusUpdate:       timestamppb.New(peerState.ConnStatusUpdate),
-			Relayed:                peerState.Relayed,
-			Direct:                 peerState.Direct,
-			LocalIceCandidateType:  peerState.LocalIceCandidateType,
-			RemoteIceCandidateType: peerState.RemoteIceCandidateType,
-			Fqdn:                   peerState.FQDN,
+			IP:                         peerState.IP,
+			PubKey:                     peerState.PubKey,
+			ConnStatus:                 peerState.ConnStatus.String(),
+			ConnStatusUpdate:           timestamppb.New(peerState.ConnStatusUpdate),
+			Relayed:                    peerState.Relayed,
+			LocalIceCandidateType:      peerState.LocalIceCandidateType,
+			RemoteIceCandidateType:     peerState.RemoteIceCandidateType,
+			LocalIceCandidateEndpoint:  peerState.LocalIceCandidateEndpoint,
+			RemoteIceCandidateEndpoint: peerState.RemoteIceCandidateEndpoint,
+			RelayAddress:               peerState.RelayServerAddress,
+			Fqdn:                       peerState.FQDN,
+			LastWireguardHandshake:     timestamppb.New(peerState.LastWireguardHandshake),
+			BytesRx:                    peerState.BytesRx,
+			BytesTx:                    peerState.BytesTx,
+			RosenpassEnabled:           peerState.RosenpassEnabled,
+			Networks:                   maps.Keys(peerState.GetRoutes()),
+			Latency:                    durationpb.New(peerState.Latency),
 		}
 		pbFullStatus.Peers = append(pbFullStatus.Peers, pbPeerState)
 	}
+
+	for _, relayState := range fullStatus.Relays {
+		pbRelayState := &proto.RelayState{
+			URI:       relayState.URI,
+			Available: relayState.Err == nil,
+		}
+		if err := relayState.Err; err != nil {
+			pbRelayState.Error = err.Error()
+		}
+		pbFullStatus.Relays = append(pbFullStatus.Relays, pbRelayState)
+	}
+
+	for _, dnsState := range fullStatus.NSGroupStates {
+		var err string
+		if dnsState.Error != nil {
+			err = dnsState.Error.Error()
+		}
+		pbDnsState := &proto.NSGroupState{
+			Servers: dnsState.Servers,
+			Domains: dnsState.Domains,
+			Enabled: dnsState.Enabled,
+			Error:   err,
+		}
+		pbFullStatus.DnsServers = append(pbFullStatus.DnsServers, pbDnsState)
+	}
+
 	return &pbFullStatus
+}
+
+// sendTerminalNotification sends a terminal notification message
+// to inform the user that the NetBird connection session has expired.
+func sendTerminalNotification() error {
+	message := "NetBird connection session expired\n\nPlease re-authenticate to connect to the network."
+	echoCmd := exec.Command("echo", message)
+	wallCmd := exec.Command("sudo", "wall")
+
+	echoCmdStdout, err := echoCmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	wallCmd.Stdin = echoCmdStdout
+
+	if err := echoCmd.Start(); err != nil {
+		return err
+	}
+
+	if err := wallCmd.Start(); err != nil {
+		return err
+	}
+
+	if err := echoCmd.Wait(); err != nil {
+		return err
+	}
+
+	return wallCmd.Wait()
 }

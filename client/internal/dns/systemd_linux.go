@@ -4,6 +4,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
+	"github.com/netbirdio/netbird/client/internal/statemanager"
 	nbdns "github.com/netbirdio/netbird/dns"
 )
 
@@ -30,11 +32,14 @@ const (
 	systemdDbusSetDefaultRouteMethodSuffix = systemdDbusLinkInterface + ".SetDefaultRoute"
 	systemdDbusSetDomainsMethodSuffix      = systemdDbusLinkInterface + ".SetDomains"
 	systemdDbusResolvConfModeForeign       = "foreign"
+
+	dbusErrorUnknownObject = "org.freedesktop.DBus.Error.UnknownObject"
 )
 
 type systemdDbusConfigurator struct {
 	dbusLinkObject dbus.ObjectPath
 	routingAll     bool
+	ifaceName      string
 }
 
 // the types below are based on dbus specification, each field is mapped to a dbus type
@@ -52,28 +57,29 @@ type systemdDbusLinkDomainsInput struct {
 	MatchOnly bool
 }
 
-func newSystemdDbusConfigurator(wgInterface WGIface) (hostManager, error) {
-	iface, err := net.InterfaceByName(wgInterface.Name())
+func newSystemdDbusConfigurator(wgInterface string) (*systemdDbusConfigurator, error) {
+	iface, err := net.InterfaceByName(wgInterface)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get interface: %w", err)
 	}
 
 	obj, closeConn, err := getDbusObject(systemdResolvedDest, systemdDbusObjectNode)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get dbus resolved dest: %w", err)
 	}
 	defer closeConn()
 
 	var s string
 	err = obj.Call(systemdDbusGetLinkMethod, dbusDefaultFlag, iface.Index).Store(&s)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get dbus link method: %w", err)
 	}
 
 	log.Debugf("got dbus Link interface: %s from net interface %s and index %d", s, iface.Name, iface.Index)
 
 	return &systemdDbusConfigurator{
 		dbusLinkObject: dbus.ObjectPath(s),
+		ifaceName:      wgInterface,
 	}, nil
 }
 
@@ -81,10 +87,10 @@ func (s *systemdDbusConfigurator) supportCustomPort() bool {
 	return true
 }
 
-func (s *systemdDbusConfigurator) applyDNSConfig(config hostDNSConfig) error {
-	parsedIP, err := netip.ParseAddr(config.serverIP)
+func (s *systemdDbusConfigurator) applyDNSConfig(config HostDNSConfig, stateManager *statemanager.Manager) error {
+	parsedIP, err := netip.ParseAddr(config.ServerIP)
 	if err != nil {
-		return fmt.Errorf("unable to parse ip address, error: %s", err)
+		return fmt.Errorf("unable to parse ip address, error: %w", err)
 	}
 	ipAs4 := parsedIP.As4()
 	defaultLinkInput := systemdDbusDNSInput{
@@ -93,7 +99,7 @@ func (s *systemdDbusConfigurator) applyDNSConfig(config hostDNSConfig) error {
 	}
 	err = s.callLinkMethod(systemdDbusSetDNSMethodSuffix, []systemdDbusDNSInput{defaultLinkInput})
 	if err != nil {
-		return fmt.Errorf("setting the interface DNS server %s:%d failed with error: %s", config.serverIP, config.serverPort, err)
+		return fmt.Errorf("setting the interface DNS server %s:%d failed with error: %w", config.ServerIP, config.ServerPort, err)
 	}
 
 	var (
@@ -101,27 +107,27 @@ func (s *systemdDbusConfigurator) applyDNSConfig(config hostDNSConfig) error {
 		matchDomains  []string
 		domainsInput  []systemdDbusLinkDomainsInput
 	)
-	for _, dConf := range config.domains {
-		if dConf.disabled {
+	for _, dConf := range config.Domains {
+		if dConf.Disabled {
 			continue
 		}
 		domainsInput = append(domainsInput, systemdDbusLinkDomainsInput{
-			Domain:    dns.Fqdn(dConf.domain),
-			MatchOnly: dConf.matchOnly,
+			Domain:    dns.Fqdn(dConf.Domain),
+			MatchOnly: dConf.MatchOnly,
 		})
 
-		if dConf.matchOnly {
-			matchDomains = append(matchDomains, dConf.domain)
+		if dConf.MatchOnly {
+			matchDomains = append(matchDomains, dConf.Domain)
 			continue
 		}
-		searchDomains = append(searchDomains, dConf.domain)
+		searchDomains = append(searchDomains, dConf.Domain)
 	}
 
-	if config.routeAll {
-		log.Infof("configured %s:%d as main DNS forwarder for this peer", config.serverIP, config.serverPort)
+	if config.RouteAll {
+		log.Infof("configured %s:%d as main DNS forwarder for this peer", config.ServerIP, config.ServerPort)
 		err = s.callLinkMethod(systemdDbusSetDefaultRouteMethodSuffix, true)
 		if err != nil {
-			return fmt.Errorf("setting link as default dns router, failed with error: %s", err)
+			return fmt.Errorf("setting link as default dns router, failed with error: %w", err)
 		}
 		domainsInput = append(domainsInput, systemdDbusLinkDomainsInput{
 			Domain:    nbdns.RootZone,
@@ -129,7 +135,15 @@ func (s *systemdDbusConfigurator) applyDNSConfig(config hostDNSConfig) error {
 		})
 		s.routingAll = true
 	} else if s.routingAll {
-		log.Infof("removing %s:%d as main DNS forwarder for this peer", config.serverIP, config.serverPort)
+		log.Infof("removing %s:%d as main DNS forwarder for this peer", config.ServerIP, config.ServerPort)
+	}
+
+	state := &ShutdownState{
+		ManagerType: systemdManager,
+		WgIface:     s.ifaceName,
+	}
+	if err := stateManager.UpdateState(state); err != nil {
+		log.Errorf("failed to update shutdown state: %s", err)
 	}
 
 	log.Infof("adding %d search domains and %d match domains. Search list: %s , Match list: %s", len(searchDomains), len(matchDomains), searchDomains, matchDomains)
@@ -143,7 +157,7 @@ func (s *systemdDbusConfigurator) applyDNSConfig(config hostDNSConfig) error {
 func (s *systemdDbusConfigurator) setDomainsForInterface(domainsInput []systemdDbusLinkDomainsInput) error {
 	err := s.callLinkMethod(systemdDbusSetDomainsMethodSuffix, domainsInput)
 	if err != nil {
-		return fmt.Errorf("setting domains configuration failed with error: %s", err)
+		return fmt.Errorf("setting domains configuration failed with error: %w", err)
 	}
 	return s.flushCaches()
 }
@@ -153,17 +167,25 @@ func (s *systemdDbusConfigurator) restoreHostDNS() error {
 	if !isDbusListenerRunning(systemdResolvedDest, s.dbusLinkObject) {
 		return nil
 	}
+
+	// this call is required for DNS cleanup, even if it fails
 	err := s.callLinkMethod(systemdDbusRevertMethodSuffix, nil)
 	if err != nil {
-		return fmt.Errorf("unable to revert link configuration, got error: %s", err)
+		var dbusErr dbus.Error
+		if errors.As(err, &dbusErr) && dbusErr.Name == dbusErrorUnknownObject {
+			// interface is gone already
+			return nil
+		}
+		return fmt.Errorf("unable to revert link configuration, got error: %w", err)
 	}
+
 	return s.flushCaches()
 }
 
 func (s *systemdDbusConfigurator) flushCaches() error {
 	obj, closeConn, err := getDbusObject(systemdResolvedDest, systemdDbusObjectNode)
 	if err != nil {
-		return fmt.Errorf("got error while attempting to retrieve the object %s, err: %s", systemdDbusObjectNode, err)
+		return fmt.Errorf("attempting to retrieve the object %s, err: %w", systemdDbusObjectNode, err)
 	}
 	defer closeConn()
 	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
@@ -171,7 +193,7 @@ func (s *systemdDbusConfigurator) flushCaches() error {
 
 	err = obj.CallWithContext(ctx, systemdDbusFlushCachesMethod, dbusDefaultFlag).Store()
 	if err != nil {
-		return fmt.Errorf("got error while calling the FlushCaches method with context, err: %s", err)
+		return fmt.Errorf("calling the FlushCaches method with context, err: %w", err)
 	}
 
 	return nil
@@ -180,7 +202,7 @@ func (s *systemdDbusConfigurator) flushCaches() error {
 func (s *systemdDbusConfigurator) callLinkMethod(method string, value any) error {
 	obj, closeConn, err := getDbusObject(systemdResolvedDest, s.dbusLinkObject)
 	if err != nil {
-		return fmt.Errorf("got error while attempting to retrieve the object, err: %s", err)
+		return fmt.Errorf("attempting to retrieve the object, err: %w", err)
 	}
 	defer closeConn()
 
@@ -194,23 +216,52 @@ func (s *systemdDbusConfigurator) callLinkMethod(method string, value any) error
 	}
 
 	if err != nil {
-		return fmt.Errorf("got error while calling command with context, err: %s", err)
+		return fmt.Errorf("calling command with context, err: %w", err)
 	}
 
+	return nil
+}
+
+func (s *systemdDbusConfigurator) restoreUncleanShutdownDNS(*netip.Addr) error {
+	if err := s.restoreHostDNS(); err != nil {
+		return fmt.Errorf("restoring dns via systemd: %w", err)
+	}
 	return nil
 }
 
 func getSystemdDbusProperty(property string, store any) error {
 	obj, closeConn, err := getDbusObject(systemdResolvedDest, systemdDbusObjectNode)
 	if err != nil {
-		return fmt.Errorf("got error while attempting to retrieve the systemd dns manager object, error: %s", err)
+		return fmt.Errorf("attempting to retrieve the systemd dns manager object, error: %w", err)
 	}
 	defer closeConn()
 
 	v, e := obj.GetProperty(property)
 	if e != nil {
-		return fmt.Errorf("got an error getting property %s: %v", property, e)
+		return fmt.Errorf("getting property %s: %w", property, e)
 	}
 
 	return v.Store(store)
+}
+
+func isSystemdResolvedRunning() bool {
+	return isDbusListenerRunning(systemdResolvedDest, systemdDbusObjectNode)
+}
+
+func isSystemdResolveConfMode() bool {
+	if !isDbusListenerRunning(systemdResolvedDest, systemdDbusObjectNode) {
+		return false
+	}
+
+	var value string
+	if err := getSystemdDbusProperty(systemdDbusResolvConfModeProperty, &value); err != nil {
+		log.Errorf("got an error while checking systemd resolv conf mode, error: %s", err)
+		return false
+	}
+
+	if value == systemdDbusResolvConfModeForeign {
+		return true
+	}
+
+	return false
 }

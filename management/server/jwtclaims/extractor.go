@@ -20,6 +20,10 @@ const (
 	UserIDClaim = "sub"
 	// LastLoginSuffix claim for the last login
 	LastLoginSuffix = "nb_last_login"
+	// Invited claim indicates that an incoming JWT is from a user that just accepted an invitation
+	Invited = "nb_invited"
+	// IsToken claim indicates that auth type from the user is a token
+	IsToken = "is_token"
 )
 
 // ExtractClaims Extract function type
@@ -99,6 +103,10 @@ func (c *ClaimsExtractor) FromToken(token *jwt.Token) AuthorizationClaims {
 	LastLoginClaimString, ok := claims[c.authAudience+LastLoginSuffix]
 	if ok {
 		jwtClaims.LastLogin = parseTime(LastLoginClaimString.(string))
+	}
+	invitedBool, ok := claims[c.authAudience+Invited]
+	if ok {
+		jwtClaims.Invited = invitedBool.(bool)
 	}
 	return jwtClaims
 }

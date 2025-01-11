@@ -5,39 +5,43 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/instrument"
-	"go.opentelemetry.io/otel/metric/instrument/syncint64"
 )
 
 // StoreMetrics represents all metrics related to the Store
 type StoreMetrics struct {
-	globalLockAcquisitionDurationMicro syncint64.Histogram
-	globalLockAcquisitionDurationMs    syncint64.Histogram
-	persistenceDurationMicro           syncint64.Histogram
-	persistenceDurationMs              syncint64.Histogram
+	globalLockAcquisitionDurationMicro metric.Int64Histogram
+	globalLockAcquisitionDurationMs    metric.Int64Histogram
+	persistenceDurationMicro           metric.Int64Histogram
+	persistenceDurationMs              metric.Int64Histogram
+	transactionDurationMs              metric.Int64Histogram
 	ctx                                context.Context
 }
 
 // NewStoreMetrics creates an instance of StoreMetrics
 func NewStoreMetrics(ctx context.Context, meter metric.Meter) (*StoreMetrics, error) {
-	globalLockAcquisitionDurationMicro, err := meter.SyncInt64().Histogram("management.store.global.lock.acquisition.duration.micro",
-		instrument.WithUnit("microseconds"))
+	globalLockAcquisitionDurationMicro, err := meter.Int64Histogram("management.store.global.lock.acquisition.duration.micro",
+		metric.WithUnit("microseconds"))
 	if err != nil {
 		return nil, err
 	}
 
-	globalLockAcquisitionDurationMs, err := meter.SyncInt64().Histogram("management.store.global.lock.acquisition.duration.ms")
+	globalLockAcquisitionDurationMs, err := meter.Int64Histogram("management.store.global.lock.acquisition.duration.ms")
 	if err != nil {
 		return nil, err
 	}
 
-	persistenceDurationMicro, err := meter.SyncInt64().Histogram("management.store.persistence.duration.micro",
-		instrument.WithUnit("microseconds"))
+	persistenceDurationMicro, err := meter.Int64Histogram("management.store.persistence.duration.micro",
+		metric.WithUnit("microseconds"))
 	if err != nil {
 		return nil, err
 	}
 
-	persistenceDurationMs, err := meter.SyncInt64().Histogram("management.store.persistence.duration.ms")
+	persistenceDurationMs, err := meter.Int64Histogram("management.store.persistence.duration.ms")
+	if err != nil {
+		return nil, err
+	}
+
+	transactionDurationMs, err := meter.Int64Histogram("management.store.transaction.duration.ms")
 	if err != nil {
 		return nil, err
 	}
@@ -47,6 +51,7 @@ func NewStoreMetrics(ctx context.Context, meter metric.Meter) (*StoreMetrics, er
 		globalLockAcquisitionDurationMs:    globalLockAcquisitionDurationMs,
 		persistenceDurationMicro:           persistenceDurationMicro,
 		persistenceDurationMs:              persistenceDurationMs,
+		transactionDurationMs:              transactionDurationMs,
 		ctx:                                ctx,
 	}, nil
 }
@@ -61,4 +66,9 @@ func (metrics *StoreMetrics) CountGlobalLockAcquisitionDuration(duration time.Du
 func (metrics *StoreMetrics) CountPersistenceDuration(duration time.Duration) {
 	metrics.persistenceDurationMicro.Record(metrics.ctx, duration.Microseconds())
 	metrics.persistenceDurationMs.Record(metrics.ctx, duration.Milliseconds())
+}
+
+// CountTransactionDuration counts the duration of a store persistence operation
+func (metrics *StoreMetrics) CountTransactionDuration(duration time.Duration) {
+	metrics.transactionDurationMs.Record(metrics.ctx, duration.Milliseconds())
 }

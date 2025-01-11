@@ -6,33 +6,43 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/pion/transport/v2/stdnet"
+	"github.com/google/uuid"
+	"github.com/pion/transport/v3/stdnet"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/netbirdio/management-integrations/integrations"
+
+	"github.com/netbirdio/netbird/client/iface"
+	"github.com/netbirdio/netbird/client/iface/bind"
+	"github.com/netbirdio/netbird/client/iface/device"
 	"github.com/netbirdio/netbird/client/internal/dns"
 	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/peer/guard"
+	icemaker "github.com/netbirdio/netbird/client/internal/peer/ice"
 	"github.com/netbirdio/netbird/client/internal/routemanager"
 	"github.com/netbirdio/netbird/client/ssh"
 	"github.com/netbirdio/netbird/client/system"
 	nbdns "github.com/netbirdio/netbird/dns"
-	"github.com/netbirdio/netbird/iface"
-	"github.com/netbirdio/netbird/iface/bind"
 	mgmt "github.com/netbirdio/netbird/management/client"
 	mgmtProto "github.com/netbirdio/netbird/management/proto"
 	"github.com/netbirdio/netbird/management/server"
 	"github.com/netbirdio/netbird/management/server/activity"
+	"github.com/netbirdio/netbird/management/server/settings"
+	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/management/server/telemetry"
+	relayClient "github.com/netbirdio/netbird/relay/client"
 	"github.com/netbirdio/netbird/route"
 	signal "github.com/netbirdio/netbird/signal/client"
 	"github.com/netbirdio/netbird/signal/proto"
@@ -54,10 +64,16 @@ var (
 	}
 )
 
-func TestEngine_SSH(t *testing.T) {
+func TestMain(m *testing.M) {
+	_ = util.InitLog("debug", "console")
+	code := m.Run()
+	os.Exit(code)
+}
 
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping TestEngine_SSH on Windows")
+func TestEngine_SSH(t *testing.T) {
+	// todo resolve test execution on freebsd
+	if runtime.GOOS == "windows" || runtime.GOOS == "freebsd" {
+		t.Skip("skipping TestEngine_SSH")
 	}
 
 	key, err := wgtypes.GeneratePrivateKey()
@@ -69,12 +85,23 @@ func TestEngine_SSH(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{}, &EngineConfig{
-		WgIfaceName:  "utun101",
-		WgAddr:       "100.64.0.1/24",
-		WgPrivateKey: key,
-		WgPort:       33100,
-	}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+	relayMgr := relayClient.NewManager(ctx, nil, key.PublicKey().String())
+	engine := NewEngine(
+		ctx, cancel,
+		&signal.MockClient{},
+		&mgmt.MockClient{},
+		relayMgr,
+		&EngineConfig{
+			WgIfaceName:      "utun101",
+			WgAddr:           "100.64.0.1/24",
+			WgPrivateKey:     key,
+			WgPort:           33100,
+			ServerSSHAllowed: true,
+		},
+		MobileDependency{},
+		peer.NewRecorder("https://mgm"),
+		nil,
+	)
 
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -170,7 +197,7 @@ func TestEngine_SSH(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	//time.Sleep(250 * time.Millisecond)
+	// time.Sleep(250 * time.Millisecond)
 	assert.NotNil(t, engine.sshServer)
 	assert.Contains(t, sshPeersRemoved, "MNHf3Ma6z6mdLbriAJbqhX7+nM/B71lgw2+91q3LfhU=")
 
@@ -203,21 +230,39 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{}, &EngineConfig{
-		WgIfaceName:  "utun102",
-		WgAddr:       "100.64.0.1/24",
-		WgPrivateKey: key,
-		WgPort:       33100,
-	}, MobileDependency{}, peer.NewRecorder("https://mgm"))
-	newNet, err := stdnet.NewNet()
-	if err != nil {
-		t.Fatal(err)
+	relayMgr := relayClient.NewManager(ctx, nil, key.PublicKey().String())
+	engine := NewEngine(
+		ctx, cancel,
+		&signal.MockClient{},
+		&mgmt.MockClient{},
+		relayMgr,
+		&EngineConfig{
+			WgIfaceName:  "utun102",
+			WgAddr:       "100.64.0.1/24",
+			WgPrivateKey: key,
+			WgPort:       33100,
+		},
+		MobileDependency{},
+		peer.NewRecorder("https://mgm"),
+		nil)
+
+	wgIface := &iface.MockWGIface{
+		NameFunc: func() string { return "utun102" },
+		RemovePeerFunc: func(peerKey string) error {
+			return nil
+		},
 	}
-	engine.wgInterface, err = iface.NewWGIFace("utun102", "100.64.0.1/24", iface.DefaultMTU, nil, newNet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.routeManager = routemanager.NewManager(ctx, key.PublicKey().String(), engine.wgInterface, engine.statusRecorder, nil)
+	engine.wgInterface = wgIface
+	engine.routeManager = routemanager.NewManager(routemanager.ManagerConfig{
+		Context:          ctx,
+		PublicKey:        key.PublicKey().String(),
+		DNSRouteInterval: time.Minute,
+		WGInterface:      engine.wgInterface,
+		StatusRecorder:   engine.statusRecorder,
+		RelayManager:     relayMgr,
+	})
+	_, _, err = engine.routeManager.Init()
+	require.NoError(t, err)
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
 	}
@@ -226,6 +271,8 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine.udpMux = bind.NewUniversalUDPMuxDefault(bind.UniversalUDPMuxParams{UDPConn: conn})
+	engine.ctx = ctx
+	engine.srWatcher = guard.NewSRWatcher(nil, nil, nil, icemaker.Config{})
 
 	type testCase struct {
 		name       string
@@ -353,8 +400,8 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 				return
 			}
 
-			if len(engine.peerConns) != c.expectedLen {
-				t.Errorf("expecting Engine.peerConns to be of size %d, got %d", c.expectedLen, len(engine.peerConns))
+			if len(engine.peerStore.PeersPubKey()) != c.expectedLen {
+				t.Errorf("expecting Engine.peerConns to be of size %d, got %d", c.expectedLen, len(engine.peerStore.PeersPubKey()))
 			}
 
 			if engine.networkSerial != c.expectedSerial {
@@ -362,7 +409,7 @@ func TestEngine_UpdateNetworkMap(t *testing.T) {
 			}
 
 			for _, p := range c.expectedPeers {
-				conn, ok := engine.peerConns[p.GetWgPubKey()]
+				conn, ok := engine.peerStore.PeerConn(p.GetWgPubKey())
 				if !ok {
 					t.Errorf("expecting Engine.peerConns to contain peer %s", p)
 				}
@@ -389,7 +436,7 @@ func TestEngine_Sync(t *testing.T) {
 	// feed updates to Engine via mocked Management client
 	updates := make(chan *mgmtProto.SyncResponse)
 	defer close(updates)
-	syncFunc := func(msgHandler func(msg *mgmtProto.SyncResponse) error) error {
+	syncFunc := func(ctx context.Context, info *system.Info, msgHandler func(msg *mgmtProto.SyncResponse) error) error {
 		for msg := range updates {
 			err := msgHandler(msg)
 			if err != nil {
@@ -398,13 +445,14 @@ func TestEngine_Sync(t *testing.T) {
 		}
 		return nil
 	}
-
-	engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{SyncFunc: syncFunc}, &EngineConfig{
+	relayMgr := relayClient.NewManager(ctx, nil, key.PublicKey().String())
+	engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{SyncFunc: syncFunc}, relayMgr, &EngineConfig{
 		WgIfaceName:  "utun103",
 		WgAddr:       "100.64.0.1/24",
 		WgPrivateKey: key,
 		WgPort:       33100,
-	}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+	}, MobileDependency{}, peer.NewRecorder("https://mgm"), nil)
+	engine.ctx = ctx
 
 	engine.dnsServer = &dns.MockServer{
 		UpdateDNSServerFunc: func(serial uint64, update nbdns.Config) error { return nil },
@@ -557,17 +605,28 @@ func TestEngine_UpdateNetworkMapWithRoutes(t *testing.T) {
 			wgIfaceName := fmt.Sprintf("utun%d", 104+n)
 			wgAddr := fmt.Sprintf("100.66.%d.1/24", n)
 
-			engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{}, &EngineConfig{
+			relayMgr := relayClient.NewManager(ctx, nil, key.PublicKey().String())
+			engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{}, relayMgr, &EngineConfig{
 				WgIfaceName:  wgIfaceName,
 				WgAddr:       wgAddr,
 				WgPrivateKey: key,
 				WgPort:       33100,
-			}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+			}, MobileDependency{}, peer.NewRecorder("https://mgm"), nil)
+			engine.ctx = ctx
 			newNet, err := stdnet.NewNet()
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil, newNet)
+
+			opts := iface.WGIFaceOpts{
+				IFaceName:    wgIfaceName,
+				Address:      wgAddr,
+				WGPort:       engine.config.WgPort,
+				WGPrivKey:    key.String(),
+				MTU:          iface.DefaultMTU,
+				TransportNet: newNet,
+			}
+			engine.wgInterface, err = iface.NewWGIFace(opts)
 			assert.NoError(t, err, "shouldn't return error")
 			input := struct {
 				inputSerial uint64
@@ -595,8 +654,8 @@ func TestEngine_UpdateNetworkMapWithRoutes(t *testing.T) {
 			err = engine.updateNetworkMap(testCase.networkMap)
 			assert.NoError(t, err, "shouldn't return error")
 			assert.Equal(t, testCase.expectedSerial, input.inputSerial, "serial should match")
-			assert.Len(t, input.inputRoutes, testCase.expectedLen, "routes len should match")
-			assert.Equal(t, testCase.expectedRoutes, input.inputRoutes, "routes should match")
+			assert.Len(t, input.inputRoutes, testCase.expectedLen, "clientRoutes len should match")
+			assert.Equal(t, testCase.expectedRoutes, input.inputRoutes, "clientRoutes should match")
 		})
 	}
 }
@@ -726,17 +785,28 @@ func TestEngine_UpdateNetworkMapWithDNSUpdate(t *testing.T) {
 			wgIfaceName := fmt.Sprintf("utun%d", 104+n)
 			wgAddr := fmt.Sprintf("100.66.%d.1/24", n)
 
-			engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{}, &EngineConfig{
+			relayMgr := relayClient.NewManager(ctx, nil, key.PublicKey().String())
+			engine := NewEngine(ctx, cancel, &signal.MockClient{}, &mgmt.MockClient{}, relayMgr, &EngineConfig{
 				WgIfaceName:  wgIfaceName,
 				WgAddr:       wgAddr,
 				WgPrivateKey: key,
 				WgPort:       33100,
-			}, MobileDependency{}, peer.NewRecorder("https://mgm"))
+			}, MobileDependency{}, peer.NewRecorder("https://mgm"), nil)
+			engine.ctx = ctx
+
 			newNet, err := stdnet.NewNet()
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine.wgInterface, err = iface.NewWGIFace(wgIfaceName, wgAddr, iface.DefaultMTU, nil, newNet)
+			opts := iface.WGIFaceOpts{
+				IFaceName:    wgIfaceName,
+				Address:      wgAddr,
+				WGPort:       33100,
+				WGPrivKey:    key.String(),
+				MTU:          iface.DefaultMTU,
+				TransportNet: newNet,
+			}
+			engine.wgInterface, err = iface.NewWGIFace(opts)
 			assert.NoError(t, err, "shouldn't return error")
 
 			mockRouteManager := &routemanager.MockManager{
@@ -785,30 +855,16 @@ func TestEngine_UpdateNetworkMapWithDNSUpdate(t *testing.T) {
 func TestEngine_MultiplePeers(t *testing.T) {
 	// log.SetLevel(log.DebugLevel)
 
-	dir := t.TempDir()
-
-	err := util.CopyFileContents("../testdata/store.json", filepath.Join(dir, "store.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		err = os.Remove(filepath.Join(dir, "store.json")) //nolint
-		if err != nil {
-			t.Fatal(err)
-			return
-		}
-	}()
-
 	ctx, cancel := context.WithCancel(CtxInitState(context.Background()))
 	defer cancel()
 
-	sigServer, signalAddr, err := startSignal()
+	sigServer, signalAddr, err := startSignal(t)
 	if err != nil {
 		t.Fatal(err)
 		return
 	}
 	defer sigServer.Stop()
-	mgmtServer, mgmtAddr, err := startManagement(dir)
+	mgmtServer, mgmtAddr, err := startManagement(t, t.TempDir(), "../testdata/store.sql")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -835,6 +891,8 @@ func TestEngine_MultiplePeers(t *testing.T) {
 			engine.dnsServer = &dns.MockServer{}
 			mu.Lock()
 			defer mu.Unlock()
+			guid := fmt.Sprintf("{%s}", uuid.New().String())
+			device.CustomWindowsGUIDString = strings.ToLower(guid)
 			err = engine.Start()
 			if err != nil {
 				t.Errorf("unable to start engine for peer %d with error %v", j, err)
@@ -960,6 +1018,99 @@ func Test_ParseNATExternalIPMappings(t *testing.T) {
 	}
 }
 
+func Test_CheckFilesEqual(t *testing.T) {
+	testCases := []struct {
+		name         string
+		inputChecks1 []*mgmtProto.Checks
+		inputChecks2 []*mgmtProto.Checks
+		expectedBool bool
+	}{
+		{
+			name: "Equal Files In Equal Order Should Return True",
+			inputChecks1: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile1",
+						"testfile2",
+					},
+				},
+			},
+			inputChecks2: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile1",
+						"testfile2",
+					},
+				},
+			},
+			expectedBool: true,
+		},
+		{
+			name: "Equal Files In Reverse Order Should Return True",
+			inputChecks1: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile1",
+						"testfile2",
+					},
+				},
+			},
+			inputChecks2: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile2",
+						"testfile1",
+					},
+				},
+			},
+			expectedBool: true,
+		},
+		{
+			name: "Unequal Files Should Return False",
+			inputChecks1: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile1",
+						"testfile2",
+					},
+				},
+			},
+			inputChecks2: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile1",
+						"testfile3",
+					},
+				},
+			},
+			expectedBool: false,
+		},
+		{
+			name: "Compared With Empty Should Return False",
+			inputChecks1: []*mgmtProto.Checks{
+				{
+					Files: []string{
+						"testfile1",
+						"testfile2",
+					},
+				},
+			},
+			inputChecks2: []*mgmtProto.Checks{
+				{
+					Files: []string{},
+				},
+			},
+			expectedBool: false,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			result := isChecksEqual(testCase.inputChecks1, testCase.inputChecks2)
+			assert.Equal(t, testCase.expectedBool, result, "result should match expected bool")
+		})
+	}
+}
+
 func createEngine(ctx context.Context, cancel context.CancelFunc, setupKey string, i int, mgmtAddr string, signalAddr string) (*Engine, error) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
@@ -1000,10 +1151,15 @@ func createEngine(ctx context.Context, cancel context.CancelFunc, setupKey strin
 		WgPort:       wgPort,
 	}
 
-	return NewEngine(ctx, cancel, signalClient, mgmtClient, conf, MobileDependency{}, peer.NewRecorder("https://mgm")), nil
+	relayMgr := relayClient.NewManager(ctx, nil, key.PublicKey().String())
+	e, err := NewEngine(ctx, cancel, signalClient, mgmtClient, relayMgr, conf, MobileDependency{}, peer.NewRecorder("https://mgm"), nil), nil
+	e.ctx = ctx
+	return e, err
 }
 
-func startSignal() (*grpc.Server, string, error) {
+func startSignal(t *testing.T) (*grpc.Server, string, error) {
+	t.Helper()
+
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
 
 	lis, err := net.Listen("tcp", "localhost:0")
@@ -1011,7 +1167,9 @@ func startSignal() (*grpc.Server, string, error) {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
-	proto.RegisterSignalExchangeServer(s, signalServer.NewServer())
+	srv, err := signalServer.NewServer(context.Background(), otel.Meter(""))
+	require.NoError(t, err)
+	proto.RegisterSignalExchangeServer(s, srv)
 
 	go func() {
 		if err = s.Serve(lis); err != nil {
@@ -1022,10 +1180,17 @@ func startSignal() (*grpc.Server, string, error) {
 	return s, lis.Addr().String(), nil
 }
 
-func startManagement(dataDir string) (*grpc.Server, string, error) {
+func startManagement(t *testing.T, dataDir, testFile string) (*grpc.Server, string, error) {
+	t.Helper()
+
 	config := &server.Config{
 		Stuns:      []*server.Host{},
 		TURNConfig: &server.TURNConfig{},
+		Relay: &server.Relay{
+			Addresses:      []string{"127.0.0.1:1234"},
+			CredentialsTTL: util.Duration{Duration: time.Hour},
+			Secret:         "222222222222222222",
+		},
 		Signal: &server.Host{
 			Proto: "http",
 			URI:   "localhost:10000",
@@ -1039,23 +1204,30 @@ func startManagement(dataDir string) (*grpc.Server, string, error) {
 		return nil, "", err
 	}
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
-	store, err := server.NewStoreFromJson(config.Datadir, nil)
+
+	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), testFile, config.Datadir)
 	if err != nil {
 		return nil, "", err
 	}
+	t.Cleanup(cleanUp)
 
 	peersUpdateManager := server.NewPeersUpdateManager(nil)
 	eventStore := &activity.InMemoryEventStore{}
 	if err != nil {
 		return nil, "", err
 	}
-	accountManager, err := server.BuildManager(store, peersUpdateManager, nil, "", "",
-		eventStore, false)
+	ia, _ := integrations.NewIntegratedValidator(context.Background(), eventStore)
+
+	metrics, err := telemetry.NewDefaultAppMetrics(context.Background())
+	require.NoError(t, err)
+
+	accountManager, err := server.BuildManager(context.Background(), store, peersUpdateManager, nil, "", "netbird.selfhosted", eventStore, nil, false, ia, metrics)
 	if err != nil {
 		return nil, "", err
 	}
-	turnManager := server.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig)
-	mgmtServer, err := server.NewServer(config, accountManager, peersUpdateManager, turnManager, nil, nil)
+
+	secretsManager := server.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig, config.Relay)
+	mgmtServer, err := server.NewServer(context.Background(), config, accountManager, settings.NewManager(store), peersUpdateManager, secretsManager, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1074,7 +1246,8 @@ func getConnectedPeers(e *Engine) int {
 	e.syncMsgMux.Lock()
 	defer e.syncMsgMux.Unlock()
 	i := 0
-	for _, conn := range e.peerConns {
+	for _, id := range e.peerStore.PeersPubKey() {
+		conn, _ := e.peerStore.PeerConn(id)
 		if conn.Status() == peer.StatusConnected {
 			i++
 		}
@@ -1086,5 +1259,5 @@ func getPeers(e *Engine) int {
 	e.syncMsgMux.Lock()
 	defer e.syncMsgMux.Unlock()
 
-	return len(e.peerConns)
+	return len(e.peerStore.PeersPubKey())
 }

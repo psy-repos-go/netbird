@@ -1,135 +1,174 @@
 package activity
 
+import "maps"
+
 // Activity that triggered an Event
 type Activity int
 
 // Code is an activity string representation
 type Code struct {
-	message string
-	code    string
+	Message string
+	Code    string
 }
 
+// Existing consts must not be changed, as this will break the compatibility with the existing data
 const (
 	// PeerAddedByUser indicates that a user added a new peer to the system
-	PeerAddedByUser Activity = iota
+	PeerAddedByUser Activity = 0
 	// PeerAddedWithSetupKey indicates that a new peer joined the system using a setup key
-	PeerAddedWithSetupKey
+	PeerAddedWithSetupKey Activity = 1
 	// UserJoined indicates that a new user joined the account
-	UserJoined
+	UserJoined Activity = 2
 	// UserInvited indicates that a new user was invited to join the account
-	UserInvited
+	UserInvited Activity = 3
 	// AccountCreated indicates that a new account has been created
-	AccountCreated
+	AccountCreated Activity = 4
 	// PeerRemovedByUser indicates that a user removed a peer from the system
-	PeerRemovedByUser
+	PeerRemovedByUser Activity = 5
 	// RuleAdded indicates that a user added a new rule
-	RuleAdded
+	RuleAdded Activity = 6
 	// RuleUpdated indicates that a user updated a rule
-	RuleUpdated
+	RuleUpdated Activity = 7
 	// RuleRemoved indicates that a user removed a rule
-	RuleRemoved
+	RuleRemoved Activity = 8
 	// PolicyAdded indicates that a user added a new policy
-	PolicyAdded
+	PolicyAdded Activity = 9
 	// PolicyUpdated indicates that a user updated a policy
-	PolicyUpdated
+	PolicyUpdated Activity = 10
 	// PolicyRemoved indicates that a user removed a policy
-	PolicyRemoved
+	PolicyRemoved Activity = 11
 	// SetupKeyCreated indicates that a user created a new setup key
-	SetupKeyCreated
+	SetupKeyCreated Activity = 12
 	// SetupKeyUpdated indicates that a user updated a setup key
-	SetupKeyUpdated
+	SetupKeyUpdated Activity = 13
 	// SetupKeyRevoked indicates that a user revoked a setup key
-	SetupKeyRevoked
+	SetupKeyRevoked Activity = 14
 	// SetupKeyOverused indicates that setup key usage exhausted
-	SetupKeyOverused
+	SetupKeyOverused Activity = 15
 	// GroupCreated indicates that a user created a group
-	GroupCreated
+	GroupCreated Activity = 16
 	// GroupUpdated indicates that a user updated a group
-	GroupUpdated
+	GroupUpdated Activity = 17
 	// GroupAddedToPeer indicates that a user added group to a peer
-	GroupAddedToPeer
+	GroupAddedToPeer Activity = 18
 	// GroupRemovedFromPeer indicates that a user removed peer group
-	GroupRemovedFromPeer
+	GroupRemovedFromPeer Activity = 19
 	// GroupAddedToUser indicates that a user added group to a user
-	GroupAddedToUser
+	GroupAddedToUser Activity = 20
 	// GroupRemovedFromUser indicates that a user removed a group from a user
-	GroupRemovedFromUser
+	GroupRemovedFromUser Activity = 21
 	// UserRoleUpdated indicates that a user changed the role of a user
-	UserRoleUpdated
+	UserRoleUpdated Activity = 22
 	// GroupAddedToSetupKey indicates that a user added group to a setup key
-	GroupAddedToSetupKey
+	GroupAddedToSetupKey Activity = 23
 	// GroupRemovedFromSetupKey indicates that a user removed a group from a setup key
-	GroupRemovedFromSetupKey
+	GroupRemovedFromSetupKey Activity = 24
 	// GroupAddedToDisabledManagementGroups indicates that a user added a group to the DNS setting Disabled management groups
-	GroupAddedToDisabledManagementGroups
+	GroupAddedToDisabledManagementGroups Activity = 25
 	// GroupRemovedFromDisabledManagementGroups indicates that a user removed a group from the DNS setting Disabled management groups
-	GroupRemovedFromDisabledManagementGroups
+	GroupRemovedFromDisabledManagementGroups Activity = 26
 	// RouteCreated indicates that a user created a route
-	RouteCreated
+	RouteCreated Activity = 27
 	// RouteRemoved indicates that a user deleted a route
-	RouteRemoved
+	RouteRemoved Activity = 28
 	// RouteUpdated indicates that a user updated a route
-	RouteUpdated
+	RouteUpdated Activity = 29
 	// PeerSSHEnabled indicates that a user enabled SSH server on a peer
-	PeerSSHEnabled
+	PeerSSHEnabled Activity = 30
 	// PeerSSHDisabled indicates that a user disabled SSH server on a peer
-	PeerSSHDisabled
+	PeerSSHDisabled Activity = 31
 	// PeerRenamed indicates that a user renamed a peer
-	PeerRenamed
+	PeerRenamed Activity = 32
 	// PeerLoginExpirationEnabled indicates that a user enabled login expiration of a peer
-	PeerLoginExpirationEnabled
+	PeerLoginExpirationEnabled Activity = 33
 	// PeerLoginExpirationDisabled indicates that a user disabled login expiration of a peer
-	PeerLoginExpirationDisabled
+	PeerLoginExpirationDisabled Activity = 34
 	// NameserverGroupCreated indicates that a user created a nameservers group
-	NameserverGroupCreated
+	NameserverGroupCreated Activity = 35
 	// NameserverGroupDeleted indicates that a user deleted a nameservers group
-	NameserverGroupDeleted
+	NameserverGroupDeleted Activity = 36
 	// NameserverGroupUpdated indicates that a user updated a nameservers group
-	NameserverGroupUpdated
+	NameserverGroupUpdated Activity = 37
 	// AccountPeerLoginExpirationEnabled indicates that a user enabled peer login expiration for the account
-	AccountPeerLoginExpirationEnabled
+	AccountPeerLoginExpirationEnabled Activity = 38
 	// AccountPeerLoginExpirationDisabled indicates that a user disabled peer login expiration for the account
-	AccountPeerLoginExpirationDisabled
+	AccountPeerLoginExpirationDisabled Activity = 39
 	// AccountPeerLoginExpirationDurationUpdated indicates that a user updated peer login expiration duration for the account
-	AccountPeerLoginExpirationDurationUpdated
+	AccountPeerLoginExpirationDurationUpdated Activity = 40
 	// PersonalAccessTokenCreated indicates that a user created a personal access token
-	PersonalAccessTokenCreated
+	PersonalAccessTokenCreated Activity = 41
 	// PersonalAccessTokenDeleted indicates that a user deleted a personal access token
-	PersonalAccessTokenDeleted
+	PersonalAccessTokenDeleted Activity = 42
 	// ServiceUserCreated indicates that a user created a service user
-	ServiceUserCreated
+	ServiceUserCreated Activity = 43
 	// ServiceUserDeleted indicates that a user deleted a service user
-	ServiceUserDeleted
+	ServiceUserDeleted Activity = 44
 	// UserBlocked indicates that a user blocked another user
-	UserBlocked
+	UserBlocked Activity = 45
 	// UserUnblocked indicates that a user unblocked another user
-	UserUnblocked
+	UserUnblocked Activity = 46
 	// UserDeleted indicates that a user deleted another user
-	UserDeleted
+	UserDeleted Activity = 47
 	// GroupDeleted indicates that a user deleted group
-	GroupDeleted
+	GroupDeleted Activity = 48
 	// UserLoggedInPeer indicates that user logged in their peer with an interactive SSO login
-	UserLoggedInPeer
+	UserLoggedInPeer Activity = 49
 	// PeerLoginExpired indicates that the user peer login has been expired and peer disconnected
-	PeerLoginExpired
+	PeerLoginExpired Activity = 50
 	// DashboardLogin indicates that the user logged in to the dashboard
-	DashboardLogin
+	DashboardLogin Activity = 51
 	// IntegrationCreated indicates that the user created an integration
-	IntegrationCreated
+	IntegrationCreated Activity = 52
 	// IntegrationUpdated indicates that the user updated an integration
-	IntegrationUpdated
+	IntegrationUpdated Activity = 53
 	// IntegrationDeleted indicates that the user deleted an integration
-	IntegrationDeleted
+	IntegrationDeleted Activity = 54
 	// AccountPeerApprovalEnabled indicates that the user enabled peer approval for the account
-	AccountPeerApprovalEnabled
+	AccountPeerApprovalEnabled Activity = 55
 	// AccountPeerApprovalDisabled indicates that the user disabled peer approval for the account
-	AccountPeerApprovalDisabled
+	AccountPeerApprovalDisabled Activity = 56
 	// PeerApproved indicates that the peer has been approved
-	PeerApproved
+	PeerApproved Activity = 57
 	// PeerApprovalRevoked indicates that the peer approval has been revoked
-	PeerApprovalRevoked
+	PeerApprovalRevoked Activity = 58
 	// TransferredOwnerRole indicates that the user transferred the owner role of the account
-	TransferredOwnerRole
+	TransferredOwnerRole Activity = 59
+	// PostureCheckCreated indicates that the user created a posture check
+	PostureCheckCreated Activity = 60
+	// PostureCheckUpdated indicates that the user updated a posture check
+	PostureCheckUpdated Activity = 61
+	// PostureCheckDeleted indicates that the user deleted a posture check
+	PostureCheckDeleted Activity = 62
+
+	PeerInactivityExpirationEnabled  Activity = 63
+	PeerInactivityExpirationDisabled Activity = 64
+
+	AccountPeerInactivityExpirationEnabled         Activity = 65
+	AccountPeerInactivityExpirationDisabled        Activity = 66
+	AccountPeerInactivityExpirationDurationUpdated Activity = 67
+
+	SetupKeyDeleted Activity = 68
+
+	UserGroupPropagationEnabled  Activity = 69
+	UserGroupPropagationDisabled Activity = 70
+
+	AccountRoutingPeerDNSResolutionEnabled  Activity = 71
+	AccountRoutingPeerDNSResolutionDisabled Activity = 72
+
+	NetworkCreated Activity = 73
+	NetworkUpdated Activity = 74
+	NetworkDeleted Activity = 75
+
+	NetworkResourceCreated Activity = 76
+	NetworkResourceUpdated Activity = 77
+	NetworkResourceDeleted Activity = 78
+
+	NetworkRouterCreated Activity = 79
+	NetworkRouterUpdated Activity = 80
+	NetworkRouterDeleted Activity = 81
+
+	ResourceAddedToGroup     Activity = 82
+	ResourceRemovedFromGroup Activity = 83
 )
 
 var activityMap = map[Activity]Code{
@@ -193,12 +232,44 @@ var activityMap = map[Activity]Code{
 	PeerApproved:                              {"Peer approved", "peer.approve"},
 	PeerApprovalRevoked:                       {"Peer approval revoked", "peer.approval.revoke"},
 	TransferredOwnerRole:                      {"Transferred owner role", "transferred.owner.role"},
+	PostureCheckCreated:                       {"Posture check created", "posture.check.created"},
+	PostureCheckUpdated:                       {"Posture check updated", "posture.check.updated"},
+	PostureCheckDeleted:                       {"Posture check deleted", "posture.check.deleted"},
+
+	PeerInactivityExpirationEnabled:  {"Peer inactivity expiration enabled", "peer.inactivity.expiration.enable"},
+	PeerInactivityExpirationDisabled: {"Peer inactivity expiration disabled", "peer.inactivity.expiration.disable"},
+
+	AccountPeerInactivityExpirationEnabled:         {"Account peer inactivity expiration enabled", "account.peer.inactivity.expiration.enable"},
+	AccountPeerInactivityExpirationDisabled:        {"Account peer inactivity expiration disabled", "account.peer.inactivity.expiration.disable"},
+	AccountPeerInactivityExpirationDurationUpdated: {"Account peer inactivity expiration duration updated", "account.peer.inactivity.expiration.update"},
+	SetupKeyDeleted: {"Setup key deleted", "setupkey.delete"},
+
+	UserGroupPropagationEnabled:  {"User group propagation enabled", "account.setting.group.propagation.enable"},
+	UserGroupPropagationDisabled: {"User group propagation disabled", "account.setting.group.propagation.disable"},
+
+	AccountRoutingPeerDNSResolutionEnabled:  {"Account routing peer DNS resolution enabled", "account.setting.routing.peer.dns.resolution.enable"},
+	AccountRoutingPeerDNSResolutionDisabled: {"Account routing peer DNS resolution disabled", "account.setting.routing.peer.dns.resolution.disable"},
+
+	NetworkCreated: {"Network created", "network.create"},
+	NetworkUpdated: {"Network updated", "network.update"},
+	NetworkDeleted: {"Network deleted", "network.delete"},
+
+	NetworkResourceCreated: {"Network resource created", "network.resource.create"},
+	NetworkResourceUpdated: {"Network resource updated", "network.resource.update"},
+	NetworkResourceDeleted: {"Network resource deleted", "network.resource.delete"},
+
+	NetworkRouterCreated: {"Network router created", "network.router.create"},
+	NetworkRouterUpdated: {"Network router updated", "network.router.update"},
+	NetworkRouterDeleted: {"Network router deleted", "network.router.delete"},
+
+	ResourceAddedToGroup:     {"Resource added to group", "resource.group.add"},
+	ResourceRemovedFromGroup: {"Resource removed from group", "resource.group.delete"},
 }
 
 // StringCode returns a string code of the activity
 func (a Activity) StringCode() string {
 	if code, ok := activityMap[a]; ok {
-		return code.code
+		return code.Code
 	}
 	return "UNKNOWN_ACTIVITY"
 }
@@ -206,7 +277,12 @@ func (a Activity) StringCode() string {
 // Message returns a string representation of an activity
 func (a Activity) Message() string {
 	if code, ok := activityMap[a]; ok {
-		return code.message
+		return code.Message
 	}
 	return "UNKNOWN_ACTIVITY"
+}
+
+// RegisterActivityMap adds new codes to the activity map
+func RegisterActivityMap(codes map[Activity]Code) {
+	maps.Copy(activityMap, codes)
 }

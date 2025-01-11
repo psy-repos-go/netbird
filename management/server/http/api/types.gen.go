@@ -63,9 +63,42 @@ const (
 	EventActivityCodeUserUnblock                              EventActivityCode = "user.unblock"
 )
 
+// Defines values for GeoLocationCheckAction.
+const (
+	GeoLocationCheckActionAllow GeoLocationCheckAction = "allow"
+	GeoLocationCheckActionDeny  GeoLocationCheckAction = "deny"
+)
+
+// Defines values for GroupIssued.
+const (
+	GroupIssuedApi         GroupIssued = "api"
+	GroupIssuedIntegration GroupIssued = "integration"
+	GroupIssuedJwt         GroupIssued = "jwt"
+)
+
+// Defines values for GroupMinimumIssued.
+const (
+	GroupMinimumIssuedApi         GroupMinimumIssued = "api"
+	GroupMinimumIssuedIntegration GroupMinimumIssued = "integration"
+	GroupMinimumIssuedJwt         GroupMinimumIssued = "jwt"
+)
+
 // Defines values for NameserverNsType.
 const (
 	NameserverNsTypeUdp NameserverNsType = "udp"
+)
+
+// Defines values for NetworkResourceType.
+const (
+	NetworkResourceTypeDomain NetworkResourceType = "domain"
+	NetworkResourceTypeHost   NetworkResourceType = "host"
+	NetworkResourceTypeSubnet NetworkResourceType = "subnet"
+)
+
+// Defines values for PeerNetworkRangeCheckAction.
+const (
+	PeerNetworkRangeCheckActionAllow PeerNetworkRangeCheckAction = "allow"
+	PeerNetworkRangeCheckActionDeny  PeerNetworkRangeCheckAction = "deny"
 )
 
 // Defines values for PolicyRuleAction.
@@ -110,6 +143,13 @@ const (
 	PolicyRuleUpdateProtocolUdp  PolicyRuleUpdateProtocol = "udp"
 )
 
+// Defines values for ResourceType.
+const (
+	ResourceTypeDomain ResourceType = "domain"
+	ResourceTypeHost   ResourceType = "host"
+	ResourceTypeSubnet ResourceType = "subnet"
+)
+
 // Defines values for UserStatus.
 const (
 	UserStatusActive  UserStatus = "active"
@@ -117,10 +157,29 @@ const (
 	UserStatusInvited UserStatus = "invited"
 )
 
+// Defines values for UserPermissionsDashboardView.
+const (
+	UserPermissionsDashboardViewBlocked UserPermissionsDashboardView = "blocked"
+	UserPermissionsDashboardViewFull    UserPermissionsDashboardView = "full"
+	UserPermissionsDashboardViewLimited UserPermissionsDashboardView = "limited"
+)
+
 // AccessiblePeer defines model for AccessiblePeer.
 type AccessiblePeer struct {
+	// CityName Commonly used English name of the city
+	CityName CityName `json:"city_name"`
+
+	// Connected Peer to Management connection status
+	Connected bool `json:"connected"`
+
+	// CountryCode 2-letter ISO 3166-1 alpha-2 code that represents the country
+	CountryCode CountryCode `json:"country_code"`
+
 	// DnsLabel Peer's DNS label is the parsed peer name for domain resolution. It is used to form an FQDN by appending the account's domain to the peer label. e.g. peer-dns-label.netbird.cloud
 	DnsLabel string `json:"dns_label"`
+
+	// GeonameId Unique identifier from the GeoNames database for a specific geographical location.
+	GeonameId int `json:"geoname_id"`
 
 	// Id Peer ID
 	Id string `json:"id"`
@@ -128,8 +187,14 @@ type AccessiblePeer struct {
 	// Ip Peer's IP address
 	Ip string `json:"ip"`
 
+	// LastSeen Last time peer connected to Netbird's management service
+	LastSeen time.Time `json:"last_seen"`
+
 	// Name Peer's hostname
 	Name string `json:"name"`
+
+	// Os Peer's operating system and version
+	Os string `json:"os"`
 
 	// UserId User ID of the user that enrolled this peer
 	UserId string `json:"user_id"`
@@ -160,17 +225,95 @@ type AccountSettings struct {
 	// GroupsPropagationEnabled Allows propagate the new user auto groups to peers that belongs to the user
 	GroupsPropagationEnabled *bool `json:"groups_propagation_enabled,omitempty"`
 
+	// JwtAllowGroups List of groups to which users are allowed access
+	JwtAllowGroups *[]string `json:"jwt_allow_groups,omitempty"`
+
 	// JwtGroupsClaimName Name of the claim from which we extract groups names to add it to account groups.
 	JwtGroupsClaimName *string `json:"jwt_groups_claim_name,omitempty"`
 
 	// JwtGroupsEnabled Allows extract groups from JWT claim and add it to account groups.
 	JwtGroupsEnabled *bool `json:"jwt_groups_enabled,omitempty"`
 
+	// PeerInactivityExpiration Period of time of inactivity after which peer session expires (seconds).
+	PeerInactivityExpiration int `json:"peer_inactivity_expiration"`
+
+	// PeerInactivityExpirationEnabled Enables or disables peer inactivity expiration globally. After peer's session has expired the user has to log in (authenticate). Applies only to peers that were added by a user (interactive SSO login).
+	PeerInactivityExpirationEnabled bool `json:"peer_inactivity_expiration_enabled"`
+
 	// PeerLoginExpiration Period of time after which peer login expires (seconds).
 	PeerLoginExpiration int `json:"peer_login_expiration"`
 
 	// PeerLoginExpirationEnabled Enables or disables peer login expiration globally. After peer's login has expired the user has to log in (authenticate). Applies only to peers that were added by a user (interactive SSO login).
 	PeerLoginExpirationEnabled bool `json:"peer_login_expiration_enabled"`
+
+	// RegularUsersViewBlocked Allows blocking regular users from viewing parts of the system.
+	RegularUsersViewBlocked bool `json:"regular_users_view_blocked"`
+
+	// RoutingPeerDnsResolutionEnabled Enables or disables DNS resolution on the routing peers
+	RoutingPeerDnsResolutionEnabled *bool `json:"routing_peer_dns_resolution_enabled,omitempty"`
+}
+
+// Checks List of objects that perform the actual checks
+type Checks struct {
+	// GeoLocationCheck Posture check for geo location
+	GeoLocationCheck *GeoLocationCheck `json:"geo_location_check,omitempty"`
+
+	// NbVersionCheck Posture check for the version of operating system
+	NbVersionCheck *NBVersionCheck `json:"nb_version_check,omitempty"`
+
+	// OsVersionCheck Posture check for the version of operating system
+	OsVersionCheck *OSVersionCheck `json:"os_version_check,omitempty"`
+
+	// PeerNetworkRangeCheck Posture check for allow or deny access based on peer local network addresses
+	PeerNetworkRangeCheck *PeerNetworkRangeCheck `json:"peer_network_range_check,omitempty"`
+
+	// ProcessCheck Posture Check for binaries exist and are running in the peer’s system
+	ProcessCheck *ProcessCheck `json:"process_check,omitempty"`
+}
+
+// City Describe city geographical location information
+type City struct {
+	// CityName Commonly used English name of the city
+	CityName string `json:"city_name"`
+
+	// GeonameId Integer ID of the record in GeoNames database
+	GeonameId int `json:"geoname_id"`
+}
+
+// CityName Commonly used English name of the city
+type CityName = string
+
+// Country Describe country geographical location information
+type Country struct {
+	// CountryCode 2-letter ISO 3166-1 alpha-2 code that represents the country
+	CountryCode CountryCode `json:"country_code"`
+
+	// CountryName Commonly used English name of the country
+	CountryName string `json:"country_name"`
+}
+
+// CountryCode 2-letter ISO 3166-1 alpha-2 code that represents the country
+type CountryCode = string
+
+// CreateSetupKeyRequest defines model for CreateSetupKeyRequest.
+type CreateSetupKeyRequest struct {
+	// AutoGroups List of group IDs to auto-assign to peers registered with this key
+	AutoGroups []string `json:"auto_groups"`
+
+	// Ephemeral Indicate that the peer will be ephemeral or not
+	Ephemeral *bool `json:"ephemeral,omitempty"`
+
+	// ExpiresIn Expiration time in seconds
+	ExpiresIn int `json:"expires_in"`
+
+	// Name Setup Key name
+	Name string `json:"name"`
+
+	// Type Setup key type, one-off for single time usage and reusable
+	Type string `json:"type"`
+
+	// UsageLimit A number of times this key can be used. The value of 0 indicates the unlimited usage.
+	UsageLimit int `json:"usage_limit"`
 }
 
 // DNSSettings defines model for DNSSettings.
@@ -212,13 +355,25 @@ type Event struct {
 // EventActivityCode The string code of the activity that occurred during the event
 type EventActivityCode string
 
+// GeoLocationCheck Posture check for geo location
+type GeoLocationCheck struct {
+	// Action Action to take upon policy match
+	Action GeoLocationCheckAction `json:"action"`
+
+	// Locations List of geo locations to which the policy applies
+	Locations []Location `json:"locations"`
+}
+
+// GeoLocationCheckAction Action to take upon policy match
+type GeoLocationCheckAction string
+
 // Group defines model for Group.
 type Group struct {
 	// Id Group ID
 	Id string `json:"id"`
 
-	// Issued How group was issued by API or from JWT token
-	Issued *string `json:"issued,omitempty"`
+	// Issued How the group was issued (api, integration, jwt)
+	Issued *GroupIssued `json:"issued,omitempty"`
 
 	// Name Group Name identifier
 	Name string `json:"name"`
@@ -227,23 +382,36 @@ type Group struct {
 	Peers []PeerMinimum `json:"peers"`
 
 	// PeersCount Count of peers associated to the group
-	PeersCount int `json:"peers_count"`
+	PeersCount int        `json:"peers_count"`
+	Resources  []Resource `json:"resources"`
+
+	// ResourcesCount Count of resources associated to the group
+	ResourcesCount int `json:"resources_count"`
 }
+
+// GroupIssued How the group was issued (api, integration, jwt)
+type GroupIssued string
 
 // GroupMinimum defines model for GroupMinimum.
 type GroupMinimum struct {
 	// Id Group ID
 	Id string `json:"id"`
 
-	// Issued How group was issued by API or from JWT token
-	Issued *string `json:"issued,omitempty"`
+	// Issued How the group was issued (api, integration, jwt)
+	Issued *GroupMinimumIssued `json:"issued,omitempty"`
 
 	// Name Group Name identifier
 	Name string `json:"name"`
 
 	// PeersCount Count of peers associated to the group
 	PeersCount int `json:"peers_count"`
+
+	// ResourcesCount Count of resources associated to the group
+	ResourcesCount int `json:"resources_count"`
 }
+
+// GroupMinimumIssued How the group was issued (api, integration, jwt)
+type GroupMinimumIssued string
 
 // GroupRequest defines model for GroupRequest.
 type GroupRequest struct {
@@ -251,8 +419,33 @@ type GroupRequest struct {
 	Name string `json:"name"`
 
 	// Peers List of peers ids
-	Peers *[]string `json:"peers,omitempty"`
+	Peers     *[]string   `json:"peers,omitempty"`
+	Resources *[]Resource `json:"resources,omitempty"`
 }
+
+// Location Describe geographical location information
+type Location struct {
+	// CityName Commonly used English name of the city
+	CityName *CityName `json:"city_name,omitempty"`
+
+	// CountryCode 2-letter ISO 3166-1 alpha-2 code that represents the country
+	CountryCode CountryCode `json:"country_code"`
+}
+
+// MinKernelVersionCheck Posture check with the kernel version
+type MinKernelVersionCheck struct {
+	// MinKernelVersion Minimum acceptable version
+	MinKernelVersion string `json:"min_kernel_version"`
+}
+
+// MinVersionCheck Posture check for the version of operating system
+type MinVersionCheck struct {
+	// MinVersion Minimum acceptable version
+	MinVersion string `json:"min_version"`
+}
+
+// NBVersionCheck Posture check for the version of operating system
+type NBVersionCheck = MinVersionCheck
 
 // Nameserver defines model for Nameserver.
 type Nameserver struct {
@@ -271,74 +464,233 @@ type NameserverNsType string
 
 // NameserverGroup defines model for NameserverGroup.
 type NameserverGroup struct {
-	// Description Nameserver group  description
+	// Description Description of the nameserver group
 	Description string `json:"description"`
 
-	// Domains Nameserver group match domain list
+	// Domains Match domain list. It should be empty only if primary is true.
 	Domains []string `json:"domains"`
 
 	// Enabled Nameserver group status
 	Enabled bool `json:"enabled"`
 
-	// Groups Nameserver group tag groups
+	// Groups Distribution group IDs that defines group of peers that will use this nameserver group
 	Groups []string `json:"groups"`
 
 	// Id Nameserver group ID
 	Id string `json:"id"`
 
-	// Name Nameserver group name
+	// Name Name of nameserver group name
 	Name string `json:"name"`
 
-	// Nameservers Nameserver group
+	// Nameservers Nameserver list
 	Nameservers []Nameserver `json:"nameservers"`
 
-	// Primary Nameserver group primary status
+	// Primary Defines if a nameserver group is primary that resolves all domains. It should be true only if domains list is empty.
 	Primary bool `json:"primary"`
 
-	// SearchDomainsEnabled Nameserver group search domain status for match domains. It should be true only if domains list is not empty.
+	// SearchDomainsEnabled Search domain status for match domains. It should be true only if domains list is not empty.
 	SearchDomainsEnabled bool `json:"search_domains_enabled"`
 }
 
 // NameserverGroupRequest defines model for NameserverGroupRequest.
 type NameserverGroupRequest struct {
-	// Description Nameserver group  description
+	// Description Description of the nameserver group
 	Description string `json:"description"`
 
-	// Domains Nameserver group match domain list
+	// Domains Match domain list. It should be empty only if primary is true.
 	Domains []string `json:"domains"`
 
 	// Enabled Nameserver group status
 	Enabled bool `json:"enabled"`
 
-	// Groups Nameserver group tag groups
+	// Groups Distribution group IDs that defines group of peers that will use this nameserver group
 	Groups []string `json:"groups"`
 
-	// Name Nameserver group name
+	// Name Name of nameserver group name
 	Name string `json:"name"`
 
-	// Nameservers Nameserver group
+	// Nameservers Nameserver list
 	Nameservers []Nameserver `json:"nameservers"`
 
-	// Primary Nameserver group primary status
+	// Primary Defines if a nameserver group is primary that resolves all domains. It should be true only if domains list is empty.
 	Primary bool `json:"primary"`
 
-	// SearchDomainsEnabled Nameserver group search domain status for match domains. It should be true only if domains list is not empty.
+	// SearchDomainsEnabled Search domain status for match domains. It should be true only if domains list is not empty.
 	SearchDomainsEnabled bool `json:"search_domains_enabled"`
+}
+
+// Network defines model for Network.
+type Network struct {
+	// Description Network description
+	Description *string `json:"description,omitempty"`
+
+	// Id Network ID
+	Id string `json:"id"`
+
+	// Name Network name
+	Name string `json:"name"`
+
+	// Policies List of policy IDs associated with the network
+	Policies []string `json:"policies"`
+
+	// Resources List of network resource IDs associated with the network
+	Resources []string `json:"resources"`
+
+	// Routers List of router IDs associated with the network
+	Routers []string `json:"routers"`
+
+	// RoutingPeersCount Count of routing peers associated with the network
+	RoutingPeersCount int `json:"routing_peers_count"`
+}
+
+// NetworkRequest defines model for NetworkRequest.
+type NetworkRequest struct {
+	// Description Network description
+	Description *string `json:"description,omitempty"`
+
+	// Name Network name
+	Name string `json:"name"`
+}
+
+// NetworkResource defines model for NetworkResource.
+type NetworkResource struct {
+	// Address Network resource address (either a direct host like 1.1.1.1 or 1.1.1.1/32, or a subnet like 192.168.178.0/24, or domains like example.com and *.example.com)
+	Address string `json:"address"`
+
+	// Description Network resource description
+	Description *string `json:"description,omitempty"`
+
+	// Enabled Network resource status
+	Enabled bool `json:"enabled"`
+
+	// Groups Groups that the resource belongs to
+	Groups []GroupMinimum `json:"groups"`
+
+	// Id Network Resource ID
+	Id string `json:"id"`
+
+	// Name Network resource name
+	Name string `json:"name"`
+
+	// Type Network resource type based of the address
+	Type NetworkResourceType `json:"type"`
+}
+
+// NetworkResourceMinimum defines model for NetworkResourceMinimum.
+type NetworkResourceMinimum struct {
+	// Address Network resource address (either a direct host like 1.1.1.1 or 1.1.1.1/32, or a subnet like 192.168.178.0/24, or domains like example.com and *.example.com)
+	Address string `json:"address"`
+
+	// Description Network resource description
+	Description *string `json:"description,omitempty"`
+
+	// Enabled Network resource status
+	Enabled bool `json:"enabled"`
+
+	// Name Network resource name
+	Name string `json:"name"`
+}
+
+// NetworkResourceRequest defines model for NetworkResourceRequest.
+type NetworkResourceRequest struct {
+	// Address Network resource address (either a direct host like 1.1.1.1 or 1.1.1.1/32, or a subnet like 192.168.178.0/24, or domains like example.com and *.example.com)
+	Address string `json:"address"`
+
+	// Description Network resource description
+	Description *string `json:"description,omitempty"`
+
+	// Enabled Network resource status
+	Enabled bool `json:"enabled"`
+
+	// Groups Group IDs containing the resource
+	Groups []string `json:"groups"`
+
+	// Name Network resource name
+	Name string `json:"name"`
+}
+
+// NetworkResourceType Network resource type based of the address
+type NetworkResourceType string
+
+// NetworkRouter defines model for NetworkRouter.
+type NetworkRouter struct {
+	// Enabled Network router status
+	Enabled bool `json:"enabled"`
+
+	// Id Network Router Id
+	Id string `json:"id"`
+
+	// Masquerade Indicate if peer should masquerade traffic to this route's prefix
+	Masquerade bool `json:"masquerade"`
+
+	// Metric Route metric number. Lowest number has higher priority
+	Metric int `json:"metric"`
+
+	// Peer Peer Identifier associated with route. This property can not be set together with `peer_groups`
+	Peer *string `json:"peer,omitempty"`
+
+	// PeerGroups Peers Group Identifier associated with route. This property can not be set together with `peer`
+	PeerGroups *[]string `json:"peer_groups,omitempty"`
+}
+
+// NetworkRouterRequest defines model for NetworkRouterRequest.
+type NetworkRouterRequest struct {
+	// Enabled Network router status
+	Enabled bool `json:"enabled"`
+
+	// Masquerade Indicate if peer should masquerade traffic to this route's prefix
+	Masquerade bool `json:"masquerade"`
+
+	// Metric Route metric number. Lowest number has higher priority
+	Metric int `json:"metric"`
+
+	// Peer Peer Identifier associated with route. This property can not be set together with `peer_groups`
+	Peer *string `json:"peer,omitempty"`
+
+	// PeerGroups Peers Group Identifier associated with route. This property can not be set together with `peer`
+	PeerGroups *[]string `json:"peer_groups,omitempty"`
+}
+
+// OSVersionCheck Posture check for the version of operating system
+type OSVersionCheck struct {
+	// Android Posture check for the version of operating system
+	Android *MinVersionCheck `json:"android,omitempty"`
+
+	// Darwin Posture check for the version of operating system
+	Darwin *MinVersionCheck `json:"darwin,omitempty"`
+
+	// Ios Posture check for the version of operating system
+	Ios *MinVersionCheck `json:"ios,omitempty"`
+
+	// Linux Posture check with the kernel version
+	Linux *MinKernelVersionCheck `json:"linux,omitempty"`
+
+	// Windows Posture check with the kernel version
+	Windows *MinKernelVersionCheck `json:"windows,omitempty"`
 }
 
 // Peer defines model for Peer.
 type Peer struct {
-	// AccessiblePeers List of accessible peers
-	AccessiblePeers []AccessiblePeer `json:"accessible_peers"`
-
 	// ApprovalRequired (Cloud only) Indicates whether peer needs approval
-	ApprovalRequired *bool `json:"approval_required,omitempty"`
+	ApprovalRequired bool `json:"approval_required"`
+
+	// CityName Commonly used English name of the city
+	CityName CityName `json:"city_name"`
 
 	// Connected Peer to Management connection status
 	Connected bool `json:"connected"`
 
+	// ConnectionIp Peer's public connection IP address
+	ConnectionIp string `json:"connection_ip"`
+
+	// CountryCode 2-letter ISO 3166-1 alpha-2 code that represents the country
+	CountryCode CountryCode `json:"country_code"`
+
 	// DnsLabel Peer's DNS label is the parsed peer name for domain resolution. It is used to form an FQDN by appending the account's domain to the peer label. e.g. peer-dns-label.netbird.cloud
 	DnsLabel string `json:"dns_label"`
+
+	// GeonameId Unique identifier from the GeoNames database for a specific geographical location.
+	GeonameId int `json:"geoname_id"`
 
 	// Groups Groups that the peer belongs to
 	Groups []GroupMinimum `json:"groups"`
@@ -349,8 +701,14 @@ type Peer struct {
 	// Id Peer ID
 	Id string `json:"id"`
 
+	// InactivityExpirationEnabled Indicates whether peer inactivity expiration has been enabled or not
+	InactivityExpirationEnabled bool `json:"inactivity_expiration_enabled"`
+
 	// Ip Peer's IP address
 	Ip string `json:"ip"`
+
+	// KernelVersion Peer's operating system kernel version
+	KernelVersion string `json:"kernel_version"`
 
 	// LastLogin Last time this peer performed log in (authentication). E.g., user authenticated.
 	LastLogin time.Time `json:"last_login"`
@@ -370,68 +728,17 @@ type Peer struct {
 	// Os Peer's operating system and version
 	Os string `json:"os"`
 
-	// SshEnabled Indicates whether SSH server is enabled on this peer
-	SshEnabled bool `json:"ssh_enabled"`
-
-	// UiVersion Peer's desktop UI version
-	UiVersion *string `json:"ui_version,omitempty"`
-
-	// UserId User ID of the user that enrolled this peer
-	UserId *string `json:"user_id,omitempty"`
-
-	// Version Peer's daemon or cli version
-	Version string `json:"version"`
-}
-
-// PeerBase defines model for PeerBase.
-type PeerBase struct {
-	// ApprovalRequired (Cloud only) Indicates whether peer needs approval
-	ApprovalRequired *bool `json:"approval_required,omitempty"`
-
-	// Connected Peer to Management connection status
-	Connected bool `json:"connected"`
-
-	// DnsLabel Peer's DNS label is the parsed peer name for domain resolution. It is used to form an FQDN by appending the account's domain to the peer label. e.g. peer-dns-label.netbird.cloud
-	DnsLabel string `json:"dns_label"`
-
-	// Groups Groups that the peer belongs to
-	Groups []GroupMinimum `json:"groups"`
-
-	// Hostname Hostname of the machine
-	Hostname string `json:"hostname"`
-
-	// Id Peer ID
-	Id string `json:"id"`
-
-	// Ip Peer's IP address
-	Ip string `json:"ip"`
-
-	// LastLogin Last time this peer performed log in (authentication). E.g., user authenticated.
-	LastLogin time.Time `json:"last_login"`
-
-	// LastSeen Last time peer connected to Netbird's management service
-	LastSeen time.Time `json:"last_seen"`
-
-	// LoginExpirationEnabled Indicates whether peer login expiration has been enabled or not
-	LoginExpirationEnabled bool `json:"login_expiration_enabled"`
-
-	// LoginExpired Indicates whether peer's login expired or not
-	LoginExpired bool `json:"login_expired"`
-
-	// Name Peer's hostname
-	Name string `json:"name"`
-
-	// Os Peer's operating system and version
-	Os string `json:"os"`
+	// SerialNumber System serial number
+	SerialNumber string `json:"serial_number"`
 
 	// SshEnabled Indicates whether SSH server is enabled on this peer
 	SshEnabled bool `json:"ssh_enabled"`
 
 	// UiVersion Peer's desktop UI version
-	UiVersion *string `json:"ui_version,omitempty"`
+	UiVersion string `json:"ui_version"`
 
 	// UserId User ID of the user that enrolled this peer
-	UserId *string `json:"user_id,omitempty"`
+	UserId string `json:"user_id"`
 
 	// Version Peer's daemon or cli version
 	Version string `json:"version"`
@@ -443,13 +750,25 @@ type PeerBatch struct {
 	AccessiblePeersCount int `json:"accessible_peers_count"`
 
 	// ApprovalRequired (Cloud only) Indicates whether peer needs approval
-	ApprovalRequired *bool `json:"approval_required,omitempty"`
+	ApprovalRequired bool `json:"approval_required"`
+
+	// CityName Commonly used English name of the city
+	CityName CityName `json:"city_name"`
 
 	// Connected Peer to Management connection status
 	Connected bool `json:"connected"`
 
+	// ConnectionIp Peer's public connection IP address
+	ConnectionIp string `json:"connection_ip"`
+
+	// CountryCode 2-letter ISO 3166-1 alpha-2 code that represents the country
+	CountryCode CountryCode `json:"country_code"`
+
 	// DnsLabel Peer's DNS label is the parsed peer name for domain resolution. It is used to form an FQDN by appending the account's domain to the peer label. e.g. peer-dns-label.netbird.cloud
 	DnsLabel string `json:"dns_label"`
+
+	// GeonameId Unique identifier from the GeoNames database for a specific geographical location.
+	GeonameId int `json:"geoname_id"`
 
 	// Groups Groups that the peer belongs to
 	Groups []GroupMinimum `json:"groups"`
@@ -460,8 +779,14 @@ type PeerBatch struct {
 	// Id Peer ID
 	Id string `json:"id"`
 
+	// InactivityExpirationEnabled Indicates whether peer inactivity expiration has been enabled or not
+	InactivityExpirationEnabled bool `json:"inactivity_expiration_enabled"`
+
 	// Ip Peer's IP address
 	Ip string `json:"ip"`
+
+	// KernelVersion Peer's operating system kernel version
+	KernelVersion string `json:"kernel_version"`
 
 	// LastLogin Last time this peer performed log in (authentication). E.g., user authenticated.
 	LastLogin time.Time `json:"last_login"`
@@ -481,14 +806,17 @@ type PeerBatch struct {
 	// Os Peer's operating system and version
 	Os string `json:"os"`
 
+	// SerialNumber System serial number
+	SerialNumber string `json:"serial_number"`
+
 	// SshEnabled Indicates whether SSH server is enabled on this peer
 	SshEnabled bool `json:"ssh_enabled"`
 
 	// UiVersion Peer's desktop UI version
-	UiVersion *string `json:"ui_version,omitempty"`
+	UiVersion string `json:"ui_version"`
 
 	// UserId User ID of the user that enrolled this peer
-	UserId *string `json:"user_id,omitempty"`
+	UserId string `json:"user_id"`
 
 	// Version Peer's daemon or cli version
 	Version string `json:"version"`
@@ -503,13 +831,26 @@ type PeerMinimum struct {
 	Name string `json:"name"`
 }
 
+// PeerNetworkRangeCheck Posture check for allow or deny access based on peer local network addresses
+type PeerNetworkRangeCheck struct {
+	// Action Action to take upon policy match
+	Action PeerNetworkRangeCheckAction `json:"action"`
+
+	// Ranges List of peer network ranges in CIDR notation
+	Ranges []string `json:"ranges"`
+}
+
+// PeerNetworkRangeCheckAction Action to take upon policy match
+type PeerNetworkRangeCheckAction string
+
 // PeerRequest defines model for PeerRequest.
 type PeerRequest struct {
 	// ApprovalRequired (Cloud only) Indicates whether peer needs approval
-	ApprovalRequired       *bool  `json:"approval_required,omitempty"`
-	LoginExpirationEnabled bool   `json:"login_expiration_enabled"`
-	Name                   string `json:"name"`
-	SshEnabled             bool   `json:"ssh_enabled"`
+	ApprovalRequired            *bool  `json:"approval_required,omitempty"`
+	InactivityExpirationEnabled bool   `json:"inactivity_expiration_enabled"`
+	LoginExpirationEnabled      bool   `json:"login_expiration_enabled"`
+	Name                        string `json:"name"`
+	SshEnabled                  bool   `json:"ssh_enabled"`
 }
 
 // PersonalAccessToken defines model for PersonalAccessToken.
@@ -553,7 +894,7 @@ type PersonalAccessTokenRequest struct {
 // Policy defines model for Policy.
 type Policy struct {
 	// Description Policy friendly description
-	Description string `json:"description"`
+	Description *string `json:"description,omitempty"`
 
 	// Enabled Policy status
 	Enabled bool `json:"enabled"`
@@ -564,29 +905,41 @@ type Policy struct {
 	// Name Policy name identifier
 	Name string `json:"name"`
 
-	// Query Policy Rego query
-	Query string `json:"query"`
-
 	// Rules Policy rule object for policy UI editor
 	Rules []PolicyRule `json:"rules"`
+
+	// SourcePostureChecks Posture checks ID's applied to policy source groups
+	SourcePostureChecks []string `json:"source_posture_checks"`
+}
+
+// PolicyCreate defines model for PolicyCreate.
+type PolicyCreate struct {
+	// Description Policy friendly description
+	Description *string `json:"description,omitempty"`
+
+	// Enabled Policy status
+	Enabled bool `json:"enabled"`
+
+	// Name Policy name identifier
+	Name string `json:"name"`
+
+	// Rules Policy rule object for policy UI editor
+	Rules []PolicyRuleUpdate `json:"rules"`
+
+	// SourcePostureChecks Posture checks ID's applied to policy source groups
+	SourcePostureChecks *[]string `json:"source_posture_checks,omitempty"`
 }
 
 // PolicyMinimum defines model for PolicyMinimum.
 type PolicyMinimum struct {
 	// Description Policy friendly description
-	Description string `json:"description"`
+	Description *string `json:"description,omitempty"`
 
 	// Enabled Policy status
 	Enabled bool `json:"enabled"`
 
-	// Id Policy ID
-	Id *string `json:"id,omitempty"`
-
 	// Name Policy name identifier
 	Name string `json:"name"`
-
-	// Query Policy Rego query
-	Query string `json:"query"`
 }
 
 // PolicyRule defines model for PolicyRule.
@@ -598,10 +951,11 @@ type PolicyRule struct {
 	Bidirectional bool `json:"bidirectional"`
 
 	// Description Policy rule friendly description
-	Description *string `json:"description,omitempty"`
+	Description         *string   `json:"description,omitempty"`
+	DestinationResource *Resource `json:"destinationResource,omitempty"`
 
-	// Destinations Policy rule destination groups
-	Destinations []GroupMinimum `json:"destinations"`
+	// Destinations Policy rule destination group IDs
+	Destinations *[]GroupMinimum `json:"destinations,omitempty"`
 
 	// Enabled Policy rule status
 	Enabled bool `json:"enabled"`
@@ -612,14 +966,18 @@ type PolicyRule struct {
 	// Name Policy rule name identifier
 	Name string `json:"name"`
 
-	// Ports Policy rule affected ports or it ranges list
+	// PortRanges Policy rule affected ports ranges list
+	PortRanges *[]RulePortRange `json:"port_ranges,omitempty"`
+
+	// Ports Policy rule affected ports
 	Ports *[]string `json:"ports,omitempty"`
 
 	// Protocol Policy rule type of the traffic
-	Protocol PolicyRuleProtocol `json:"protocol"`
+	Protocol       PolicyRuleProtocol `json:"protocol"`
+	SourceResource *Resource          `json:"sourceResource,omitempty"`
 
-	// Sources Policy rule source groups
-	Sources []GroupMinimum `json:"sources"`
+	// Sources Policy rule source group IDs
+	Sources *[]GroupMinimum `json:"sources,omitempty"`
 }
 
 // PolicyRuleAction Policy rule accept or drops packets
@@ -642,13 +1000,13 @@ type PolicyRuleMinimum struct {
 	// Enabled Policy rule status
 	Enabled bool `json:"enabled"`
 
-	// Id Policy rule ID
-	Id *string `json:"id,omitempty"`
-
 	// Name Policy rule name identifier
 	Name string `json:"name"`
 
-	// Ports Policy rule affected ports or it ranges list
+	// PortRanges Policy rule affected ports ranges list
+	PortRanges *[]RulePortRange `json:"port_ranges,omitempty"`
+
+	// Ports Policy rule affected ports
 	Ports *[]string `json:"ports,omitempty"`
 
 	// Protocol Policy rule type of the traffic
@@ -670,10 +1028,11 @@ type PolicyRuleUpdate struct {
 	Bidirectional bool `json:"bidirectional"`
 
 	// Description Policy rule friendly description
-	Description *string `json:"description,omitempty"`
+	Description         *string   `json:"description,omitempty"`
+	DestinationResource *Resource `json:"destinationResource,omitempty"`
 
-	// Destinations Policy rule destination groups
-	Destinations []string `json:"destinations"`
+	// Destinations Policy rule destination group IDs
+	Destinations *[]string `json:"destinations,omitempty"`
 
 	// Enabled Policy rule status
 	Enabled bool `json:"enabled"`
@@ -684,14 +1043,18 @@ type PolicyRuleUpdate struct {
 	// Name Policy rule name identifier
 	Name string `json:"name"`
 
-	// Ports Policy rule affected ports or it ranges list
+	// PortRanges Policy rule affected ports ranges list
+	PortRanges *[]RulePortRange `json:"port_ranges,omitempty"`
+
+	// Ports Policy rule affected ports
 	Ports *[]string `json:"ports,omitempty"`
 
 	// Protocol Policy rule type of the traffic
-	Protocol PolicyRuleUpdateProtocol `json:"protocol"`
+	Protocol       PolicyRuleUpdateProtocol `json:"protocol"`
+	SourceResource *Resource                `json:"sourceResource,omitempty"`
 
-	// Sources Policy rule source groups
-	Sources []string `json:"sources"`
+	// Sources Policy rule source group IDs
+	Sources *[]string `json:"sources,omitempty"`
 }
 
 // PolicyRuleUpdateAction Policy rule accept or drops packets
@@ -703,37 +1066,97 @@ type PolicyRuleUpdateProtocol string
 // PolicyUpdate defines model for PolicyUpdate.
 type PolicyUpdate struct {
 	// Description Policy friendly description
-	Description string `json:"description"`
+	Description *string `json:"description,omitempty"`
 
 	// Enabled Policy status
 	Enabled bool `json:"enabled"`
 
-	// Id Policy ID
-	Id *string `json:"id,omitempty"`
-
 	// Name Policy name identifier
 	Name string `json:"name"`
 
-	// Query Policy Rego query
-	Query string `json:"query"`
-
 	// Rules Policy rule object for policy UI editor
 	Rules []PolicyRuleUpdate `json:"rules"`
+
+	// SourcePostureChecks Posture checks ID's applied to policy source groups
+	SourcePostureChecks *[]string `json:"source_posture_checks,omitempty"`
 }
+
+// PostureCheck defines model for PostureCheck.
+type PostureCheck struct {
+	// Checks List of objects that perform the actual checks
+	Checks Checks `json:"checks"`
+
+	// Description Posture check friendly description
+	Description *string `json:"description,omitempty"`
+
+	// Id Posture check ID
+	Id string `json:"id"`
+
+	// Name Posture check unique name identifier
+	Name string `json:"name"`
+}
+
+// PostureCheckUpdate defines model for PostureCheckUpdate.
+type PostureCheckUpdate struct {
+	// Checks List of objects that perform the actual checks
+	Checks *Checks `json:"checks,omitempty"`
+
+	// Description Posture check friendly description
+	Description string `json:"description"`
+
+	// Name Posture check name identifier
+	Name string `json:"name"`
+}
+
+// Process Describes the operational activity within a peer's system.
+type Process struct {
+	// LinuxPath Path to the process executable file in a Linux operating system
+	LinuxPath *string `json:"linux_path,omitempty"`
+
+	// MacPath Path to the process executable file in a Mac operating system
+	MacPath *string `json:"mac_path,omitempty"`
+
+	// WindowsPath Path to the process executable file in a Windows operating system
+	WindowsPath *string `json:"windows_path,omitempty"`
+}
+
+// ProcessCheck Posture Check for binaries exist and are running in the peer’s system
+type ProcessCheck struct {
+	Processes []Process `json:"processes"`
+}
+
+// Resource defines model for Resource.
+type Resource struct {
+	// Id ID of the resource
+	Id   string       `json:"id"`
+	Type ResourceType `json:"type"`
+}
+
+// ResourceType defines model for ResourceType.
+type ResourceType string
 
 // Route defines model for Route.
 type Route struct {
+	// AccessControlGroups Access control group identifier associated with route.
+	AccessControlGroups *[]string `json:"access_control_groups,omitempty"`
+
 	// Description Route description
 	Description string `json:"description"`
+
+	// Domains Domain list to be dynamically resolved. Max of 32 domains can be added per route configuration. Conflicts with network
+	Domains *[]string `json:"domains,omitempty"`
 
 	// Enabled Route status
 	Enabled bool `json:"enabled"`
 
-	// Groups Route group tag groups
+	// Groups Group IDs containing routing peers
 	Groups []string `json:"groups"`
 
 	// Id Route Id
 	Id string `json:"id"`
+
+	// KeepRoute Indicate if the route should be kept after a domain doesn't resolve that IP anymore
+	KeepRoute bool `json:"keep_route"`
 
 	// Masquerade Indicate if peer should masquerade traffic to this route's prefix
 	Masquerade bool `json:"masquerade"`
@@ -741,13 +1164,13 @@ type Route struct {
 	// Metric Route metric number. Lowest number has higher priority
 	Metric int `json:"metric"`
 
-	// Network Network range in CIDR format
-	Network string `json:"network"`
+	// Network Network range in CIDR format, Conflicts with domains
+	Network *string `json:"network,omitempty"`
 
 	// NetworkId Route network identifier, to group HA routes
 	NetworkId string `json:"network_id"`
 
-	// NetworkType Network type indicating if it is IPv4 or IPv6
+	// NetworkType Network type indicating if it is a domain route or a IPv4/IPv6 route
 	NetworkType string `json:"network_type"`
 
 	// Peer Peer Identifier associated with route. This property can not be set together with `peer_groups`
@@ -759,14 +1182,23 @@ type Route struct {
 
 // RouteRequest defines model for RouteRequest.
 type RouteRequest struct {
+	// AccessControlGroups Access control group identifier associated with route.
+	AccessControlGroups *[]string `json:"access_control_groups,omitempty"`
+
 	// Description Route description
 	Description string `json:"description"`
+
+	// Domains Domain list to be dynamically resolved. Max of 32 domains can be added per route configuration. Conflicts with network
+	Domains *[]string `json:"domains,omitempty"`
 
 	// Enabled Route status
 	Enabled bool `json:"enabled"`
 
-	// Groups Route group tag groups
+	// Groups Group IDs containing routing peers
 	Groups []string `json:"groups"`
+
+	// KeepRoute Indicate if the route should be kept after a domain doesn't resolve that IP anymore
+	KeepRoute bool `json:"keep_route"`
 
 	// Masquerade Indicate if peer should masquerade traffic to this route's prefix
 	Masquerade bool `json:"masquerade"`
@@ -774,8 +1206,8 @@ type RouteRequest struct {
 	// Metric Route metric number. Lowest number has higher priority
 	Metric int `json:"metric"`
 
-	// Network Network range in CIDR format
-	Network string `json:"network"`
+	// Network Network range in CIDR format, Conflicts with domains
+	Network *string `json:"network,omitempty"`
 
 	// NetworkId Route network identifier, to group HA routes
 	NetworkId string `json:"network_id"`
@@ -787,64 +1219,13 @@ type RouteRequest struct {
 	PeerGroups *[]string `json:"peer_groups,omitempty"`
 }
 
-// Rule defines model for Rule.
-type Rule struct {
-	// Description Rule friendly description
-	Description string `json:"description"`
+// RulePortRange Policy rule affected ports range
+type RulePortRange struct {
+	// End The ending port of the range
+	End int `json:"end"`
 
-	// Destinations Rule destination groups
-	Destinations []GroupMinimum `json:"destinations"`
-
-	// Disabled Rules status
-	Disabled bool `json:"disabled"`
-
-	// Flow Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
-	Flow string `json:"flow"`
-
-	// Id Rule ID
-	Id string `json:"id"`
-
-	// Name Rule name identifier
-	Name string `json:"name"`
-
-	// Sources Rule source groups
-	Sources []GroupMinimum `json:"sources"`
-}
-
-// RuleMinimum defines model for RuleMinimum.
-type RuleMinimum struct {
-	// Description Rule friendly description
-	Description string `json:"description"`
-
-	// Disabled Rules status
-	Disabled bool `json:"disabled"`
-
-	// Flow Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
-	Flow string `json:"flow"`
-
-	// Name Rule name identifier
-	Name string `json:"name"`
-}
-
-// RuleRequest defines model for RuleRequest.
-type RuleRequest struct {
-	// Description Rule friendly description
-	Description string `json:"description"`
-
-	// Destinations List of destination groups
-	Destinations *[]string `json:"destinations,omitempty"`
-
-	// Disabled Rules status
-	Disabled bool `json:"disabled"`
-
-	// Flow Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
-	Flow string `json:"flow"`
-
-	// Name Rule name identifier
-	Name string `json:"name"`
-
-	// Sources List of source groups
-	Sources *[]string `json:"sources,omitempty"`
+	// Start The starting port of the range
+	Start int `json:"start"`
 }
 
 // SetupKey defines model for SetupKey.
@@ -861,7 +1242,94 @@ type SetupKey struct {
 	// Id Setup Key ID
 	Id string `json:"id"`
 
-	// Key Setup Key value
+	// Key Setup Key as secret
+	Key string `json:"key"`
+
+	// LastUsed Setup key last usage date
+	LastUsed time.Time `json:"last_used"`
+
+	// Name Setup key name identifier
+	Name string `json:"name"`
+
+	// Revoked Setup key revocation status
+	Revoked bool `json:"revoked"`
+
+	// State Setup key status, "valid", "overused","expired" or "revoked"
+	State string `json:"state"`
+
+	// Type Setup key type, one-off for single time usage and reusable
+	Type string `json:"type"`
+
+	// UpdatedAt Setup key last update date
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// UsageLimit A number of times this key can be used. The value of 0 indicates the unlimited usage.
+	UsageLimit int `json:"usage_limit"`
+
+	// UsedTimes Usage count of setup key
+	UsedTimes int `json:"used_times"`
+
+	// Valid Setup key validity status
+	Valid bool `json:"valid"`
+}
+
+// SetupKeyBase defines model for SetupKeyBase.
+type SetupKeyBase struct {
+	// AutoGroups List of group IDs to auto-assign to peers registered with this key
+	AutoGroups []string `json:"auto_groups"`
+
+	// Ephemeral Indicate that the peer will be ephemeral or not
+	Ephemeral bool `json:"ephemeral"`
+
+	// Expires Setup Key expiration date
+	Expires time.Time `json:"expires"`
+
+	// Id Setup Key ID
+	Id string `json:"id"`
+
+	// LastUsed Setup key last usage date
+	LastUsed time.Time `json:"last_used"`
+
+	// Name Setup key name identifier
+	Name string `json:"name"`
+
+	// Revoked Setup key revocation status
+	Revoked bool `json:"revoked"`
+
+	// State Setup key status, "valid", "overused","expired" or "revoked"
+	State string `json:"state"`
+
+	// Type Setup key type, one-off for single time usage and reusable
+	Type string `json:"type"`
+
+	// UpdatedAt Setup key last update date
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// UsageLimit A number of times this key can be used. The value of 0 indicates the unlimited usage.
+	UsageLimit int `json:"usage_limit"`
+
+	// UsedTimes Usage count of setup key
+	UsedTimes int `json:"used_times"`
+
+	// Valid Setup key validity status
+	Valid bool `json:"valid"`
+}
+
+// SetupKeyClear defines model for SetupKeyClear.
+type SetupKeyClear struct {
+	// AutoGroups List of group IDs to auto-assign to peers registered with this key
+	AutoGroups []string `json:"auto_groups"`
+
+	// Ephemeral Indicate that the peer will be ephemeral or not
+	Ephemeral bool `json:"ephemeral"`
+
+	// Expires Setup Key expiration date
+	Expires time.Time `json:"expires"`
+
+	// Id Setup Key ID
+	Id string `json:"id"`
+
+	// Key Setup Key as plain text
 	Key string `json:"key"`
 
 	// LastUsed Setup key last usage date
@@ -897,28 +1365,13 @@ type SetupKeyRequest struct {
 	// AutoGroups List of group IDs to auto-assign to peers registered with this key
 	AutoGroups []string `json:"auto_groups"`
 
-	// Ephemeral Indicate that the peer will be ephemeral or not
-	Ephemeral *bool `json:"ephemeral,omitempty"`
-
-	// ExpiresIn Expiration time in seconds
-	ExpiresIn int `json:"expires_in"`
-
-	// Name Setup Key name
-	Name string `json:"name"`
-
 	// Revoked Setup key revocation status
 	Revoked bool `json:"revoked"`
-
-	// Type Setup key type, one-off for single time usage and reusable
-	Type string `json:"type"`
-
-	// UsageLimit A number of times this key can be used. The value of 0 indicates the unlimited usage.
-	UsageLimit int `json:"usage_limit"`
 }
 
 // User defines model for User.
 type User struct {
-	// AutoGroups Groups to auto-assign to peers registered by this user
+	// AutoGroups Group IDs to auto-assign to peers registered by this user
 	AutoGroups []string `json:"auto_groups"`
 
 	// Email User's email address
@@ -943,7 +1396,8 @@ type User struct {
 	LastLogin *time.Time `json:"last_login,omitempty"`
 
 	// Name User's name from idp provider
-	Name string `json:"name"`
+	Name        string           `json:"name"`
+	Permissions *UserPermissions `json:"permissions,omitempty"`
 
 	// Role User's NetBird account role
 	Role string `json:"role"`
@@ -957,7 +1411,7 @@ type UserStatus string
 
 // UserCreateRequest defines model for UserCreateRequest.
 type UserCreateRequest struct {
-	// AutoGroups Groups to auto-assign to peers registered by this user
+	// AutoGroups Group IDs to auto-assign to peers registered by this user
 	AutoGroups []string `json:"auto_groups"`
 
 	// Email User's Email to send invite to
@@ -973,9 +1427,18 @@ type UserCreateRequest struct {
 	Role string `json:"role"`
 }
 
+// UserPermissions defines model for UserPermissions.
+type UserPermissions struct {
+	// DashboardView User's permission to view the dashboard
+	DashboardView *UserPermissionsDashboardView `json:"dashboard_view,omitempty"`
+}
+
+// UserPermissionsDashboardView User's permission to view the dashboard
+type UserPermissionsDashboardView string
+
 // UserRequest defines model for UserRequest.
 type UserRequest struct {
-	// AutoGroups Groups to auto-assign to peers registered by this user
+	// AutoGroups Group IDs to auto-assign to peers registered by this user
 	AutoGroups []string `json:"auto_groups"`
 
 	// IsBlocked If set to true then user is blocked and can't use the system
@@ -1009,6 +1472,24 @@ type PostApiGroupsJSONRequestBody = GroupRequest
 // PutApiGroupsGroupIdJSONRequestBody defines body for PutApiGroupsGroupId for application/json ContentType.
 type PutApiGroupsGroupIdJSONRequestBody = GroupRequest
 
+// PostApiNetworksJSONRequestBody defines body for PostApiNetworks for application/json ContentType.
+type PostApiNetworksJSONRequestBody = NetworkRequest
+
+// PutApiNetworksNetworkIdJSONRequestBody defines body for PutApiNetworksNetworkId for application/json ContentType.
+type PutApiNetworksNetworkIdJSONRequestBody = NetworkRequest
+
+// PostApiNetworksNetworkIdResourcesJSONRequestBody defines body for PostApiNetworksNetworkIdResources for application/json ContentType.
+type PostApiNetworksNetworkIdResourcesJSONRequestBody = NetworkResourceRequest
+
+// PutApiNetworksNetworkIdResourcesResourceIdJSONRequestBody defines body for PutApiNetworksNetworkIdResourcesResourceId for application/json ContentType.
+type PutApiNetworksNetworkIdResourcesResourceIdJSONRequestBody = NetworkResourceRequest
+
+// PostApiNetworksNetworkIdRoutersJSONRequestBody defines body for PostApiNetworksNetworkIdRouters for application/json ContentType.
+type PostApiNetworksNetworkIdRoutersJSONRequestBody = NetworkRouterRequest
+
+// PutApiNetworksNetworkIdRoutersRouterIdJSONRequestBody defines body for PutApiNetworksNetworkIdRoutersRouterId for application/json ContentType.
+type PutApiNetworksNetworkIdRoutersRouterIdJSONRequestBody = NetworkRouterRequest
+
 // PutApiPeersPeerIdJSONRequestBody defines body for PutApiPeersPeerId for application/json ContentType.
 type PutApiPeersPeerIdJSONRequestBody = PeerRequest
 
@@ -1016,7 +1497,13 @@ type PutApiPeersPeerIdJSONRequestBody = PeerRequest
 type PostApiPoliciesJSONRequestBody = PolicyUpdate
 
 // PutApiPoliciesPolicyIdJSONRequestBody defines body for PutApiPoliciesPolicyId for application/json ContentType.
-type PutApiPoliciesPolicyIdJSONRequestBody = PolicyUpdate
+type PutApiPoliciesPolicyIdJSONRequestBody = PolicyCreate
+
+// PostApiPostureChecksJSONRequestBody defines body for PostApiPostureChecks for application/json ContentType.
+type PostApiPostureChecksJSONRequestBody = PostureCheckUpdate
+
+// PutApiPostureChecksPostureCheckIdJSONRequestBody defines body for PutApiPostureChecksPostureCheckId for application/json ContentType.
+type PutApiPostureChecksPostureCheckIdJSONRequestBody = PostureCheckUpdate
 
 // PostApiRoutesJSONRequestBody defines body for PostApiRoutes for application/json ContentType.
 type PostApiRoutesJSONRequestBody = RouteRequest
@@ -1024,14 +1511,8 @@ type PostApiRoutesJSONRequestBody = RouteRequest
 // PutApiRoutesRouteIdJSONRequestBody defines body for PutApiRoutesRouteId for application/json ContentType.
 type PutApiRoutesRouteIdJSONRequestBody = RouteRequest
 
-// PostApiRulesJSONRequestBody defines body for PostApiRules for application/json ContentType.
-type PostApiRulesJSONRequestBody = RuleRequest
-
-// PutApiRulesRuleIdJSONRequestBody defines body for PutApiRulesRuleId for application/json ContentType.
-type PutApiRulesRuleIdJSONRequestBody = RuleRequest
-
 // PostApiSetupKeysJSONRequestBody defines body for PostApiSetupKeys for application/json ContentType.
-type PostApiSetupKeysJSONRequestBody = SetupKeyRequest
+type PostApiSetupKeysJSONRequestBody = CreateSetupKeyRequest
 
 // PutApiSetupKeysKeyIdJSONRequestBody defines body for PutApiSetupKeysKeyId for application/json ContentType.
 type PutApiSetupKeysKeyIdJSONRequestBody = SetupKeyRequest

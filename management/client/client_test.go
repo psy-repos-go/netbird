@@ -3,17 +3,24 @@ package client
 import (
 	"context"
 	"net"
-	"path/filepath"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/netbirdio/netbird/management/server/activity"
+	"github.com/netbirdio/netbird/management/server/settings"
+	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/management/server/telemetry"
 
 	"github.com/netbirdio/netbird/client/system"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/netbirdio/management-integrations/integrations"
 
 	"github.com/netbirdio/netbird/encryption"
 	mgmtProto "github.com/netbirdio/netbird/management/proto"
@@ -30,20 +37,19 @@ import (
 
 const ValidKey = "A2C8E62B-38F5-4553-B31E-DD66C696CEBB"
 
+func TestMain(m *testing.M) {
+	_ = util.InitLog("debug", "console")
+	code := m.Run()
+	os.Exit(code)
+}
+
 func startManagement(t *testing.T) (*grpc.Server, net.Listener) {
 	t.Helper()
 	level, _ := log.ParseLevel("debug")
 	log.SetLevel(level)
 
-	testDir := t.TempDir()
-
 	config := &mgmt.Config{}
 	_, err := util.ReadJson("../server/testdata/management.json", config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.Datadir = testDir
-	err = util.CopyFileContents("../server/testdata/store.json", filepath.Join(testDir, "store.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,20 +59,26 @@ func startManagement(t *testing.T) (*grpc.Server, net.Listener) {
 		t.Fatal(err)
 	}
 	s := grpc.NewServer()
-	store, err := mgmt.NewStoreFromJson(config.Datadir, nil)
+	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), "../server/testdata/store.sql", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanUp)
+
+	peersUpdateManager := mgmt.NewPeersUpdateManager(nil)
+	eventStore := &activity.InMemoryEventStore{}
+	ia, _ := integrations.NewIntegratedValidator(context.Background(), eventStore)
+
+	metrics, err := telemetry.NewDefaultAppMetrics(context.Background())
+	require.NoError(t, err)
+
+	accountManager, err := mgmt.BuildManager(context.Background(), store, peersUpdateManager, nil, "", "netbird.selfhosted", eventStore, nil, false, ia, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	peersUpdateManager := mgmt.NewPeersUpdateManager(nil)
-	eventStore := &activity.InMemoryEventStore{}
-	accountManager, err := mgmt.BuildManager(store, peersUpdateManager, nil, "", "",
-		eventStore, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	turnManager := mgmt.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig)
-	mgmtServer, err := mgmt.NewServer(config, accountManager, peersUpdateManager, turnManager, nil, nil)
+	secretsManager := mgmt.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig, config.Relay)
+	mgmtServer, err := mgmt.NewServer(context.Background(), config, accountManager, settings.NewManager(store), peersUpdateManager, secretsManager, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +259,7 @@ func TestClient_Sync(t *testing.T) {
 	ch := make(chan *mgmtProto.SyncResponse, 1)
 
 	go func() {
-		err = client.Sync(func(msg *mgmtProto.SyncResponse) error {
+		err = client.Sync(context.Background(), info, func(msg *mgmtProto.SyncResponse) error {
 			ch <- msg
 			return nil
 		})
@@ -344,18 +356,74 @@ func Test_SystemMetaDataFromClient(t *testing.T) {
 
 	wg.Wait()
 
+	protoNetAddr := make([]*mgmtProto.NetworkAddress, 0, len(info.NetworkAddresses))
+	for _, addr := range info.NetworkAddresses {
+		protoNetAddr = append(protoNetAddr, &mgmtProto.NetworkAddress{
+			NetIP: addr.NetIP.String(),
+			Mac:   addr.Mac,
+		})
+
+	}
+
 	expectedMeta := &mgmtProto.PeerSystemMeta{
 		Hostname:           info.Hostname,
 		GoOS:               info.GoOS,
 		Kernel:             info.Kernel,
-		Core:               info.OSVersion,
 		Platform:           info.Platform,
 		OS:                 info.OS,
+		Core:               info.OSVersion,
+		OSVersion:          info.OSVersion,
 		WiretrusteeVersion: info.WiretrusteeVersion,
+		KernelVersion:      info.KernelVersion,
+
+		NetworkAddresses: protoNetAddr,
+		SysSerialNumber:  info.SystemSerialNumber,
+		SysProductName:   info.SystemProductName,
+		SysManufacturer:  info.SystemManufacturer,
+		Environment:      &mgmtProto.Environment{Cloud: info.Environment.Cloud, Platform: info.Environment.Platform},
 	}
 
 	assert.Equal(t, ValidKey, actualValidKey)
-	assert.Equal(t, expectedMeta, actualMeta)
+	if !isEqual(expectedMeta, actualMeta) {
+		t.Errorf("expected and actual meta are not equal")
+	}
+}
+
+func isEqual(a, b *mgmtProto.PeerSystemMeta) bool {
+	if len(a.NetworkAddresses) != len(b.NetworkAddresses) {
+		return false
+	}
+
+	for _, addr := range a.GetNetworkAddresses() {
+		var found bool
+		for _, oAddr := range b.GetNetworkAddresses() {
+			if addr.GetMac() == oAddr.GetMac() && addr.GetNetIP() == oAddr.GetNetIP() {
+				found = true
+				continue
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	log.Infof("------")
+
+	return a.GetHostname() == b.GetHostname() &&
+		a.GetGoOS() == b.GetGoOS() &&
+		a.GetKernel() == b.GetKernel() &&
+		a.GetKernelVersion() == b.GetKernelVersion() &&
+		a.GetCore() == b.GetCore() &&
+		a.GetPlatform() == b.GetPlatform() &&
+		a.GetOS() == b.GetOS() &&
+		a.GetOSVersion() == b.GetOSVersion() &&
+		a.GetWiretrusteeVersion() == b.GetWiretrusteeVersion() &&
+		a.GetUiVersion() == b.GetUiVersion() &&
+		a.GetSysSerialNumber() == b.GetSysSerialNumber() &&
+		a.GetSysProductName() == b.GetSysProductName() &&
+		a.GetSysManufacturer() == b.GetSysManufacturer() &&
+		a.GetEnvironment().Cloud == b.GetEnvironment().Cloud &&
+		a.GetEnvironment().Platform == b.GetEnvironment().Platform
 }
 
 func Test_GetDeviceAuthorizationFlow(t *testing.T) {

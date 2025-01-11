@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -24,20 +25,17 @@ const (
 	DirectCheck uint32 = 1
 )
 
-// FeaturesSupport register protocol supported features
-type FeaturesSupport struct {
-	DirectCheck bool
-}
-
 type Client interface {
 	io.Closer
 	StreamConnected() bool
 	GetStatus() Status
-	Receive(msgHandler func(msg *proto.Message) error) error
+	Receive(ctx context.Context, msgHandler func(msg *proto.Message) error) error
 	Ready() bool
+	IsHealthy() bool
 	WaitStreamConnected()
 	SendToStream(msg *proto.EncryptedMessage) error
 	Send(msg *proto.Message) error
+	SetOnReconnectedListener(func())
 }
 
 // UnMarshalCredential parses the credentials from the message and returns a Credential instance
@@ -53,16 +51,21 @@ func UnMarshalCredential(msg *proto.Message) (*Credential, error) {
 	}, nil
 }
 
-// MarshalCredential marsharl a Credential instance and returns a Message object
-func MarshalCredential(myKey wgtypes.Key, myPort int, remoteKey wgtypes.Key, credential *Credential, t proto.Body_Type) (*proto.Message, error) {
+// MarshalCredential marshal a Credential instance and returns a Message object
+func MarshalCredential(myKey wgtypes.Key, myPort int, remoteKey string, credential *Credential, t proto.Body_Type, rosenpassPubKey []byte, rosenpassAddr string, relaySrvAddress string) (*proto.Message, error) {
 	return &proto.Message{
 		Key:       myKey.PublicKey().String(),
-		RemoteKey: remoteKey.String(),
+		RemoteKey: remoteKey,
 		Body: &proto.Body{
 			Type:           t,
 			Payload:        fmt.Sprintf("%s:%s", credential.UFrag, credential.Pwd),
 			WgListenPort:   uint32(myPort),
 			NetBirdVersion: version.NetbirdVersion(),
+			RosenpassConfig: &proto.RosenpassConfig{
+				RosenpassPubKey:     rosenpassPubKey,
+				RosenpassServerAddr: rosenpassAddr,
+			},
+			RelayServerAddress: relaySrvAddress,
 		},
 	}, nil
 }
@@ -71,16 +74,4 @@ func MarshalCredential(myKey wgtypes.Key, myPort int, remoteKey wgtypes.Key, cre
 type Credential struct {
 	UFrag string
 	Pwd   string
-}
-
-// ParseFeaturesSupported parses a slice of supported features into FeaturesSupport
-func ParseFeaturesSupported(featuresMessage []uint32) FeaturesSupport {
-	var protoSupport FeaturesSupport
-	for _, feature := range featuresMessage {
-		if feature == DirectCheck {
-			protoSupport.DirectCheck = true
-			return protoSupport
-		}
-	}
-	return protoSupport
 }

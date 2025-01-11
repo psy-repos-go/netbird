@@ -6,6 +6,9 @@ import (
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
+
+	"github.com/netbirdio/netbird/client/firewall/uspfilter/conntrack"
+	"github.com/netbirdio/netbird/client/internal/statemanager"
 )
 
 type action string
@@ -17,12 +20,27 @@ const (
 )
 
 // Reset firewall to the default state
-func (m *Manager) Reset() error {
+func (m *Manager) Reset(*statemanager.Manager) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	m.outgoingRules = make(map[string]RuleSet)
 	m.incomingRules = make(map[string]RuleSet)
+
+	if m.udpTracker != nil {
+		m.udpTracker.Close()
+		m.udpTracker = conntrack.NewUDPTracker(conntrack.DefaultUDPTimeout)
+	}
+
+	if m.icmpTracker != nil {
+		m.icmpTracker.Close()
+		m.icmpTracker = conntrack.NewICMPTracker(conntrack.DefaultICMPTimeout)
+	}
+
+	if m.tcpTracker != nil {
+		m.tcpTracker.Close()
+		m.tcpTracker = conntrack.NewTCPTracker(conntrack.DefaultTCPTimeout)
+	}
 
 	if !isWindowsFirewallReachable() {
 		return nil
@@ -64,15 +82,18 @@ func manageFirewallRule(ruleName string, action action, extraArgs ...string) err
 	if action == addRule {
 		args = append(args, extraArgs...)
 	}
-
-	cmd := exec.Command("netsh", args...)
+	netshCmd := GetSystem32Command("netsh")
+	cmd := exec.Command(netshCmd, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Run()
 }
 
 func isWindowsFirewallReachable() bool {
 	args := []string{"advfirewall", "show", "allprofiles", "state"}
-	cmd := exec.Command("netsh", args...)
+
+	netshCmd := GetSystem32Command("netsh")
+
+	cmd := exec.Command(netshCmd, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	_, err := cmd.Output()
@@ -87,8 +108,23 @@ func isWindowsFirewallReachable() bool {
 func isFirewallRuleActive(ruleName string) bool {
 	args := []string{"advfirewall", "firewall", "show", "rule", "name=" + ruleName}
 
-	cmd := exec.Command("netsh", args...)
+	netshCmd := GetSystem32Command("netsh")
+
+	cmd := exec.Command(netshCmd, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_, err := cmd.Output()
 	return err == nil
+}
+
+// GetSystem32Command checks if a command can be found in the system path and returns it. In case it can't find it
+// in the path it will return the full path of a command assuming C:\windows\system32 as the base path.
+func GetSystem32Command(command string) string {
+	_, err := exec.LookPath(command)
+	if err == nil {
+		return command
+	}
+
+	log.Tracef("Command %s not found in PATH, using C:\\windows\\system32\\%s.exe path", command, command)
+
+	return "C:\\windows\\system32\\" + command + ".exe"
 }
