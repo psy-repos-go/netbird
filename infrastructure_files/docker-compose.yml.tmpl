@@ -2,7 +2,7 @@ version: "3"
 services:
   #UI dashboard
   dashboard:
-    image: wiretrustee/dashboard:latest
+    image: netbirdio/dashboard:$NETBIRD_DASHBOARD_TAG
     restart: unless-stopped
     ports:
       - 80:80
@@ -28,10 +28,14 @@ services:
       - LETSENCRYPT_EMAIL=$NETBIRD_LETSENCRYPT_EMAIL
     volumes:
       - $LETSENCRYPT_VOLUMENAME:/etc/letsencrypt/
-
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "2"
   # Signal
   signal:
-    image: netbirdio/signal:latest
+    image: netbirdio/signal:$NETBIRD_SIGNAL_TAG
     restart: unless-stopped
     volumes:
       - $SIGNAL_VOLUMENAME:/var/lib/netbird
@@ -40,10 +44,32 @@ services:
   #      # port and command for Let's Encrypt validation
   #      - 443:443
   #    command: ["--letsencrypt-domain", "$NETBIRD_LETSENCRYPT_DOMAIN", "--log-file", "console"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "2"
+  # Relay
+  relay:
+    image: netbirdio/relay:$NETBIRD_RELAY_TAG
+    restart: unless-stopped
+    environment:
+    - NB_LOG_LEVEL=info
+    - NB_LISTEN_ADDRESS=:$NETBIRD_RELAY_PORT
+    - NB_EXPOSED_ADDRESS=$NETBIRD_RELAY_DOMAIN:$NETBIRD_RELAY_PORT
+    # todo: change to a secure secret
+    - NB_AUTH_SECRET=$NETBIRD_RELAY_AUTH_SECRET
+    ports:
+      - $NETBIRD_RELAY_PORT:$NETBIRD_RELAY_PORT
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "2"
 
   # Management
   management:
-    image: netbirdio/management:latest
+    image: netbirdio/management:$NETBIRD_MANAGEMENT_TAG
     restart: unless-stopped
     depends_on:
       - dashboard
@@ -58,16 +84,25 @@ services:
     command: [
       "--port", "443",
       "--log-file", "console",
+      "--log-level", "info",
       "--disable-anonymous-metrics=$NETBIRD_DISABLE_ANONYMOUS_METRICS",
       "--single-account-mode-domain=$NETBIRD_MGMT_SINGLE_ACCOUNT_MODE_DOMAIN",
       "--dns-domain=$NETBIRD_MGMT_DNS_DOMAIN"
       ]
-
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "2"
+    environment:
+      - NETBIRD_STORE_ENGINE_POSTGRES_DSN=$NETBIRD_STORE_ENGINE_POSTGRES_DSN
+      - NETBIRD_STORE_ENGINE_MYSQL_DSN=$NETBIRD_STORE_ENGINE_MYSQL_DSN
+      
   # Coturn
   coturn:
-    image: coturn/coturn
+    image: coturn/coturn:$COTURN_TAG
     restart: unless-stopped
-    domainname: $NETBIRD_DOMAIN
+    #domainname: $TURN_DOMAIN # only needed when TLS is enabled
     volumes:
       - ./turnserver.conf:/etc/turnserver.conf:ro
     #      - ./privkey.pem:/etc/coturn/private/privkey.pem:ro
@@ -75,7 +110,11 @@ services:
     network_mode: host
     command:
       - -c /etc/turnserver.conf
-
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "2"
 volumes:
   $MGMT_VOLUMENAME:
   $SIGNAL_VOLUMENAME:

@@ -2,37 +2,61 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"math/rand"
 	"net"
 	"net/netip"
 	"reflect"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/pion/ice/v2"
+	"github.com/hashicorp/go-multierror"
+	"github.com/pion/ice/v3"
+	"github.com/pion/stun/v2"
 	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"google.golang.org/protobuf/proto"
 
+	nberrors "github.com/netbirdio/netbird/client/errors"
+	"github.com/netbirdio/netbird/client/firewall"
+	"github.com/netbirdio/netbird/client/firewall/manager"
+	"github.com/netbirdio/netbird/client/iface"
+	"github.com/netbirdio/netbird/client/iface/bind"
+	"github.com/netbirdio/netbird/client/iface/device"
+	"github.com/netbirdio/netbird/client/iface/netstack"
 	"github.com/netbirdio/netbird/client/internal/acl"
 	"github.com/netbirdio/netbird/client/internal/dns"
+	"github.com/netbirdio/netbird/client/internal/dnsfwd"
+	"github.com/netbirdio/netbird/client/internal/networkmonitor"
 	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/peer/guard"
+	icemaker "github.com/netbirdio/netbird/client/internal/peer/ice"
+	"github.com/netbirdio/netbird/client/internal/peerstore"
+	"github.com/netbirdio/netbird/client/internal/relay"
+	"github.com/netbirdio/netbird/client/internal/rosenpass"
 	"github.com/netbirdio/netbird/client/internal/routemanager"
-	"github.com/netbirdio/netbird/client/internal/wgproxy"
+	"github.com/netbirdio/netbird/client/internal/routemanager/systemops"
+	"github.com/netbirdio/netbird/client/internal/statemanager"
+	"github.com/netbirdio/netbird/management/domain"
+	semaphoregroup "github.com/netbirdio/netbird/util/semaphore-group"
+
 	nbssh "github.com/netbirdio/netbird/client/ssh"
+	"github.com/netbirdio/netbird/client/system"
 	nbdns "github.com/netbirdio/netbird/dns"
-	"github.com/netbirdio/netbird/iface"
-	"github.com/netbirdio/netbird/iface/bind"
 	mgm "github.com/netbirdio/netbird/management/client"
 	mgmProto "github.com/netbirdio/netbird/management/proto"
+	auth "github.com/netbirdio/netbird/relay/auth/hmac"
+	relayClient "github.com/netbirdio/netbird/relay/client"
 	"github.com/netbirdio/netbird/route"
-	"github.com/netbirdio/netbird/sharedsock"
 	signal "github.com/netbirdio/netbird/signal/client"
 	sProto "github.com/netbirdio/netbird/signal/proto"
 	"github.com/netbirdio/netbird/util"
+	nbnet "github.com/netbirdio/netbird/util/net"
 )
 
 // PeerConnectionTimeoutMax is a timeout of an initial connection attempt to a remote peer.
@@ -42,6 +66,7 @@ import (
 const (
 	PeerConnectionTimeoutMax = 45000 // ms
 	PeerConnectionTimeoutMin = 30000 // ms
+	connInitLimit            = 200
 )
 
 var ErrResetConnection = fmt.Errorf("reset connection")
@@ -56,6 +81,9 @@ type EngineConfig struct {
 
 	// WgPrivateKey is a Wireguard private key of our peer (it MUST never leave the machine)
 	WgPrivateKey wgtypes.Key
+
+	// NetworkMonitor is a flag to enable network monitoring
+	NetworkMonitor bool
 
 	// IFaceBlackList is a list of network interfaces to ignore when discovering connection candidates (ICE related)
 	IFaceBlackList       []string
@@ -75,16 +103,37 @@ type EngineConfig struct {
 	NATExternalIPs []string
 
 	CustomDNSAddress string
+
+	RosenpassEnabled    bool
+	RosenpassPermissive bool
+
+	ServerSSHAllowed bool
+
+	DNSRouteInterval time.Duration
+
+	DisableClientRoutes bool
+	DisableServerRoutes bool
+	DisableDNS          bool
+	DisableFirewall     bool
+
+	BlockLANAccess bool
 }
 
 // Engine is a mechanism responsible for reacting on Signal and Management stream events and managing connections to the remote peers.
 type Engine struct {
 	// signal is a Signal Service client
-	signal signal.Client
+	signal   signal.Client
+	signaler *peer.Signaler
 	// mgmClient is a Management Service client
 	mgmClient mgm.Client
 	// peerConns is a map that holds all the peers that are known to this peer
-	peerConns map[string]*peer.Conn
+	peerStore *peerstore.Store
+
+	beforePeerHook nbnet.AddHookFunc
+	afterPeerHook  nbnet.RemoveHookFunc
+
+	// rpManager is a Rosenpass manager
+	rpManager *rosenpass.Manager
 
 	// syncMsgMux is used to guarantee sequential Management Service message processing
 	syncMsgMux *sync.Mutex
@@ -93,32 +142,49 @@ type Engine struct {
 	mobileDep MobileDependency
 
 	// STUNs is a list of STUN servers used by ICE
-	STUNs []*ice.URL
+	STUNs []*stun.URI
 	// TURNs is a list of STUN servers used by ICE
-	TURNs []*ice.URL
+	TURNs    []*stun.URI
+	stunTurn icemaker.StunTurn
 
+	clientCtx    context.Context
+	clientCancel context.CancelFunc
+
+	ctx    context.Context
 	cancel context.CancelFunc
 
-	ctx context.Context
+	wgInterface iface.IWGIface
 
-	wgInterface    *iface.WGIface
-	wgProxyFactory *wgproxy.Factory
-
-	udpMux     *bind.UniversalUDPMuxDefault
-	udpMuxConn io.Closer
+	udpMux *bind.UniversalUDPMuxDefault
 
 	// networkSerial is the latest CurrentSerial (state ID) of the network sent by the Management service
 	networkSerial uint64
+
+	networkMonitor *networkmonitor.NetworkMonitor
 
 	sshServerFunc func(hostKeyPEM []byte, addr string) (nbssh.Server, error)
 	sshServer     nbssh.Server
 
 	statusRecorder *peer.Status
 
-	routeManager routemanager.Manager
-	acl          acl.Manager
+	firewall      manager.Manager
+	routeManager  routemanager.Manager
+	acl           acl.Manager
+	dnsForwardMgr *dnsfwd.Manager
 
 	dnsServer dns.Server
+
+	// checks are the client-applied posture checks that need to be evaluated on the client
+	checks []*mgmProto.Checks
+
+	relayManager *relayClient.Manager
+	stateManager *statemanager.Manager
+	srWatcher    *guard.SRWatcher
+
+	// Network map persistence
+	persistNetworkMap bool
+	latestNetworkMap  *mgmProto.NetworkMap
+	connSemaphore     *semaphoregroup.SemaphoreGroup
 }
 
 // Peer is an instance of the Connection Peer
@@ -127,46 +193,122 @@ type Peer struct {
 	WgAllowedIps string
 }
 
-// NewEngine creates a new Connection Engine
-func NewEngine(
-	ctx context.Context, cancel context.CancelFunc,
-	signalClient signal.Client, mgmClient mgm.Client,
-	config *EngineConfig, mobileDep MobileDependency, statusRecorder *peer.Status,
-) *Engine {
+type localIpUpdater interface {
+	UpdateLocalIPs() error
+}
 
-	return &Engine{
-		ctx:            ctx,
-		cancel:         cancel,
+// NewEngine creates a new Connection Engine with probes attached
+func NewEngine(
+	clientCtx context.Context,
+	clientCancel context.CancelFunc,
+	signalClient signal.Client,
+	mgmClient mgm.Client,
+	relayManager *relayClient.Manager,
+	config *EngineConfig,
+	mobileDep MobileDependency,
+	statusRecorder *peer.Status,
+	checks []*mgmProto.Checks,
+) *Engine {
+	engine := &Engine{
+		clientCtx:      clientCtx,
+		clientCancel:   clientCancel,
 		signal:         signalClient,
+		signaler:       peer.NewSignaler(signalClient, config.WgPrivateKey),
 		mgmClient:      mgmClient,
-		peerConns:      make(map[string]*peer.Conn),
+		relayManager:   relayManager,
+		peerStore:      peerstore.NewConnStore(),
 		syncMsgMux:     &sync.Mutex{},
 		config:         config,
 		mobileDep:      mobileDep,
-		STUNs:          []*ice.URL{},
-		TURNs:          []*ice.URL{},
+		STUNs:          []*stun.URI{},
+		TURNs:          []*stun.URI{},
 		networkSerial:  0,
 		sshServerFunc:  nbssh.DefaultSSHServer,
 		statusRecorder: statusRecorder,
-		wgProxyFactory: wgproxy.NewFactory(config.WgPort),
+		checks:         checks,
+		connSemaphore:  semaphoregroup.NewSemaphoreGroup(connInitLimit),
 	}
+	if runtime.GOOS == "ios" {
+		if !fileExists(mobileDep.StateFilePath) {
+			err := createFile(mobileDep.StateFilePath)
+			if err != nil {
+				log.Errorf("failed to create state file: %v", err)
+				// we are not exiting as we can run without the state manager
+			}
+		}
+
+		engine.stateManager = statemanager.New(mobileDep.StateFilePath)
+	}
+	if path := statemanager.GetDefaultStatePath(); path != "" {
+		engine.stateManager = statemanager.New(path)
+	}
+
+	return engine
 }
 
 func (e *Engine) Stop() error {
+	if e == nil {
+		// this seems to be a very odd case but there was the possibility if the netbird down command comes before the engine is fully started
+		log.Debugf("tried stopping engine that is nil")
+		return nil
+	}
 	e.syncMsgMux.Lock()
 	defer e.syncMsgMux.Unlock()
 
+	// stopping network monitor first to avoid starting the engine again
+	if e.networkMonitor != nil {
+		e.networkMonitor.Stop()
+	}
+	log.Info("Network monitor: stopped")
+
+	// stop/restore DNS first so dbus and friends don't complain because of a missing interface
+	e.stopDNSServer()
+
+	if e.routeManager != nil {
+		e.routeManager.Stop(e.stateManager)
+	}
+
+	if e.dnsForwardMgr != nil {
+		if err := e.dnsForwardMgr.Stop(context.Background()); err != nil {
+			log.Errorf("failed to stop DNS forward: %v", err)
+		}
+		e.dnsForwardMgr = nil
+	}
+
+	if e.srWatcher != nil {
+		e.srWatcher.Close()
+	}
+
+	e.statusRecorder.ReplaceOfflinePeers([]peer.State{})
+	e.statusRecorder.UpdateDNSStates([]peer.NSGroupState{})
+	e.statusRecorder.UpdateRelayStates([]relay.ProbeResult{})
+
 	err := e.removeAllPeers()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to remove all peers: %s", err)
+	}
+
+	if e.cancel != nil {
+		e.cancel()
 	}
 
 	// very ugly but we want to remove peers from the WireGuard interface first before removing interface.
-	// Removing peers happens in the conn.CLose() asynchronously
+	// Removing peers happens in the conn.Close() asynchronously
 	time.Sleep(500 * time.Millisecond)
 
 	e.close()
 	log.Infof("stopped Netbird Engine")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := e.stateManager.Stop(ctx); err != nil {
+		return fmt.Errorf("failed to stop state manager: %w", err)
+	}
+	if err := e.stateManager.PersistState(context.Background()); err != nil {
+		log.Errorf("failed to persist state: %v", err)
+	}
+
 	return nil
 }
 
@@ -177,103 +319,202 @@ func (e *Engine) Start() error {
 	e.syncMsgMux.Lock()
 	defer e.syncMsgMux.Unlock()
 
-	wgIFaceName := e.config.WgIfaceName
-	wgAddr := e.config.WgAddr
-	myPrivateKey := e.config.WgPrivateKey
-	var err error
-	transportNet, err := e.newStdNet()
+	if e.cancel != nil {
+		e.cancel()
+	}
+	e.ctx, e.cancel = context.WithCancel(e.clientCtx)
+
+	wgIface, err := e.newWgIface()
 	if err != nil {
-		log.Errorf("failed to create pion's stdnet: %s", err)
+		log.Errorf("failed creating wireguard interface instance %s: [%s]", e.config.WgIfaceName, err)
+		return fmt.Errorf("new wg interface: %w", err)
+	}
+	e.wgInterface = wgIface
+
+	if e.config.RosenpassEnabled {
+		log.Infof("rosenpass is enabled")
+		if e.config.RosenpassPermissive {
+			log.Infof("running rosenpass in permissive mode")
+		} else {
+			log.Infof("running rosenpass in strict mode")
+		}
+		e.rpManager, err = rosenpass.NewManager(e.config.PreSharedKey, e.config.WgIfaceName)
+		if err != nil {
+			return fmt.Errorf("create rosenpass manager: %w", err)
+		}
+		err := e.rpManager.Run()
+		if err != nil {
+			return fmt.Errorf("run rosenpass manager: %w", err)
+		}
 	}
 
-	e.wgInterface, err = iface.NewWGIFace(wgIFaceName, wgAddr, iface.DefaultMTU, e.mobileDep.TunAdapter, transportNet)
+	e.stateManager.Start()
+
+	initialRoutes, dnsServer, err := e.newDnsServer()
 	if err != nil {
-		log.Errorf("failed creating wireguard interface instance %s: [%s]", wgIFaceName, err.Error())
-		return err
+		e.close()
+		return fmt.Errorf("create dns server: %w", err)
+	}
+	e.dnsServer = dnsServer
+
+	e.routeManager = routemanager.NewManager(routemanager.ManagerConfig{
+		Context:             e.ctx,
+		PublicKey:           e.config.WgPrivateKey.PublicKey().String(),
+		DNSRouteInterval:    e.config.DNSRouteInterval,
+		WGInterface:         e.wgInterface,
+		StatusRecorder:      e.statusRecorder,
+		RelayManager:        e.relayManager,
+		InitialRoutes:       initialRoutes,
+		StateManager:        e.stateManager,
+		DNSServer:           dnsServer,
+		PeerStore:           e.peerStore,
+		DisableClientRoutes: e.config.DisableClientRoutes,
+		DisableServerRoutes: e.config.DisableServerRoutes,
+	})
+	beforePeerHook, afterPeerHook, err := e.routeManager.Init()
+	if err != nil {
+		log.Errorf("Failed to initialize route manager: %s", err)
+	} else {
+		e.beforePeerHook = beforePeerHook
+		e.afterPeerHook = afterPeerHook
 	}
 
-	var routes []*route.Route
-
-	if runtime.GOOS == "android" {
-		var dnsConfig *nbdns.Config
-		routes, dnsConfig, err = e.readInitialSettings()
-		if err != nil {
-			return err
-		}
-		if e.dnsServer == nil {
-			e.dnsServer = dns.NewDefaultServerPermanentUpstream(e.ctx, e.wgInterface, e.mobileDep.HostDNSAddresses, *dnsConfig, e.mobileDep.NetworkChangeListener)
-			go e.mobileDep.DnsReadyListener.OnReady()
-		}
-	} else if e.dnsServer == nil {
-		// todo fix custom address
-		e.dnsServer, err = dns.NewDefaultServer(e.ctx, e.wgInterface, e.config.CustomDNSAddress)
-		if err != nil {
-			e.close()
-			return err
-		}
-	}
-
-	e.routeManager = routemanager.NewManager(e.ctx, e.config.WgPrivateKey.PublicKey().String(), e.wgInterface, e.statusRecorder, routes)
 	e.routeManager.SetRouteChangeListener(e.mobileDep.NetworkChangeListener)
 
-	if runtime.GOOS == "android" {
-		err = e.wgInterface.CreateOnMobile(iface.MobileIFaceArguments{
-			Routes:        e.routeManager.InitialRouteRange(),
-			Dns:           e.dnsServer.DnsIP(),
-			SearchDomains: e.dnsServer.SearchDomains(),
-		})
-	} else {
-		err = e.wgInterface.Create()
-	}
+	err = e.wgInterfaceCreate()
 	if err != nil {
-		log.Errorf("failed creating tunnel interface %s: [%s]", wgIFaceName, err.Error())
+		log.Errorf("failed creating tunnel interface %s: [%s]", e.config.WgIfaceName, err.Error())
 		e.close()
+		return fmt.Errorf("create wg interface: %w", err)
+	}
+
+	if err := e.createFirewall(); err != nil {
 		return err
 	}
 
-	err = e.wgInterface.Configure(myPrivateKey.String(), e.config.WgPort)
+	e.udpMux, err = e.wgInterface.Up()
 	if err != nil {
-		log.Errorf("failed configuring Wireguard interface [%s]: %s", wgIFaceName, err.Error())
+		log.Errorf("failed to pull up wgInterface [%s]: %s", e.wgInterface.Name(), err.Error())
 		e.close()
-		return err
+		return fmt.Errorf("up wg interface: %w", err)
 	}
 
-	if e.wgInterface.IsUserspaceBind() {
-		iceBind := e.wgInterface.GetBind()
-		udpMux, err := iceBind.GetICEMux()
-		if err != nil {
-			e.close()
-			return err
-		}
-		e.udpMux = udpMux
-		log.Infof("using userspace bind mode %s", udpMux.LocalAddr().String())
-	} else {
-		rawSock, err := sharedsock.Listen(e.config.WgPort, sharedsock.NewIncomingSTUNFilter())
-		if err != nil {
-			return err
-		}
-		mux := bind.NewUniversalUDPMuxDefault(bind.UniversalUDPMuxParams{UDPConn: rawSock, Net: transportNet})
-		go mux.ReadFromConn(e.ctx)
-		e.udpMuxConn = rawSock
-		e.udpMux = mux
-	}
-
-	if acl, err := acl.Create(e.wgInterface); err != nil {
-		log.Errorf("failed to create ACL manager, policy will not work: %s", err.Error())
-	} else {
-		e.acl = acl
+	if e.firewall != nil {
+		e.acl = acl.NewDefaultManager(e.firewall)
 	}
 
 	err = e.dnsServer.Initialize()
 	if err != nil {
 		e.close()
-		return err
+		return fmt.Errorf("initialize dns server: %w", err)
 	}
+
+	iceCfg := icemaker.Config{
+		StunTurn:             &e.stunTurn,
+		InterfaceBlackList:   e.config.IFaceBlackList,
+		DisableIPv6Discovery: e.config.DisableIPv6Discovery,
+		UDPMux:               e.udpMux.UDPMuxDefault,
+		UDPMuxSrflx:          e.udpMux,
+		NATExternalIPs:       e.parseNATExternalIPMappings(),
+	}
+
+	e.srWatcher = guard.NewSRWatcher(e.signal, e.relayManager, e.mobileDep.IFaceDiscover, iceCfg)
+	e.srWatcher.Start()
 
 	e.receiveSignalEvents()
 	e.receiveManagementEvents()
 
+	// starting network monitor at the very last to avoid disruptions
+	e.startNetworkMonitor()
+
 	return nil
+}
+
+func (e *Engine) createFirewall() error {
+	if e.config.DisableFirewall {
+		log.Infof("firewall is disabled")
+		return nil
+	}
+
+	var err error
+	e.firewall, err = firewall.NewFirewall(e.wgInterface, e.stateManager, e.config.DisableServerRoutes)
+	if err != nil || e.firewall == nil {
+		log.Errorf("failed creating firewall manager: %s", err)
+		return nil
+	}
+
+	if err := e.initFirewall(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (e *Engine) initFirewall() error {
+	if e.firewall.IsServerRouteSupported() {
+		if err := e.routeManager.EnableServerRouter(e.firewall); err != nil {
+			e.close()
+			return fmt.Errorf("enable server router: %w", err)
+		}
+	}
+
+	if e.config.BlockLANAccess {
+		e.blockLanAccess()
+	}
+
+	if e.rpManager == nil || !e.config.RosenpassEnabled {
+		return nil
+	}
+
+	rosenpassPort := e.rpManager.GetAddress().Port
+	port := manager.Port{Values: []uint16{uint16(rosenpassPort)}}
+
+	// this rule is static and will be torn down on engine down by the firewall manager
+	if _, err := e.firewall.AddPeerFiltering(
+		net.IP{0, 0, 0, 0},
+		manager.ProtocolUDP,
+		nil,
+		&port,
+		manager.ActionAccept,
+		"",
+		"",
+	); err != nil {
+		log.Errorf("failed to allow rosenpass interface traffic: %v", err)
+		return nil
+	}
+
+	log.Infof("rosenpass interface traffic allowed on port %d", rosenpassPort)
+
+	return nil
+}
+
+func (e *Engine) blockLanAccess() {
+	var merr *multierror.Error
+
+	// TODO: keep this updated
+	toBlock, err := getInterfacePrefixes()
+	if err != nil {
+		merr = multierror.Append(merr, fmt.Errorf("get local addresses: %w", err))
+	}
+
+	log.Infof("blocking route LAN access for networks: %v", toBlock)
+	v4 := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
+	for _, network := range toBlock {
+		if _, err := e.firewall.AddRouteFiltering(
+			[]netip.Prefix{v4},
+			network,
+			manager.ProtocolALL,
+			nil,
+			nil,
+			manager.ActionDrop,
+		); err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("add fw rule for network %s: %w", network, err))
+		}
+	}
+
+	if merr != nil {
+		log.Warnf("encountered errors blocking IPs to block LAN access: %v", nberrors.FormatErrorOrNil(merr))
+	}
 }
 
 // modifyPeers updates peers that have been modified (e.g. IP address has been changed).
@@ -284,8 +525,8 @@ func (e *Engine) modifyPeers(peersUpdate []*mgmProto.RemotePeerConfig) error {
 	var modified []*mgmProto.RemotePeerConfig
 	for _, p := range peersUpdate {
 		peerPubKey := p.GetWgPubKey()
-		if peerConn, ok := e.peerConns[peerPubKey]; ok {
-			if peerConn.WgConfig().AllowedIps != strings.Join(p.AllowedIps, ",") {
+		if allowedIPs, ok := e.peerStore.AllowedIPs(peerPubKey); ok {
+			if allowedIPs != strings.Join(p.AllowedIps, ",") {
 				modified = append(modified, p)
 				continue
 			}
@@ -316,17 +557,12 @@ func (e *Engine) modifyPeers(peersUpdate []*mgmProto.RemotePeerConfig) error {
 // removePeers finds and removes peers that do not exist anymore in the network map received from the Management Service.
 // It also removes peers that have been modified (e.g. change of IP address). They will be added again in addPeers method.
 func (e *Engine) removePeers(peersUpdate []*mgmProto.RemotePeerConfig) error {
-	currentPeers := make([]string, 0, len(e.peerConns))
-	for p := range e.peerConns {
-		currentPeers = append(currentPeers, p)
-	}
-
 	newPeers := make([]string, 0, len(peersUpdate))
 	for _, p := range peersUpdate {
 		newPeers = append(newPeers, p.GetWgPubKey())
 	}
 
-	toRemove := util.SliceDiff(currentPeers, newPeers)
+	toRemove := util.SliceDiff(e.peerStore.PeersPubKey(), newPeers)
 
 	for _, p := range toRemove {
 		err := e.removePeer(p)
@@ -340,7 +576,7 @@ func (e *Engine) removePeers(peersUpdate []*mgmProto.RemotePeerConfig) error {
 
 func (e *Engine) removeAllPeers() error {
 	log.Debugf("removing all peer connections")
-	for p := range e.peerConns {
+	for _, p := range e.peerStore.PeersPubKey() {
 		err := e.removePeer(p)
 		if err != nil {
 			return err
@@ -364,64 +600,10 @@ func (e *Engine) removePeer(peerKey string) error {
 		}
 	}()
 
-	conn, exists := e.peerConns[peerKey]
+	conn, exists := e.peerStore.Remove(peerKey)
 	if exists {
-		delete(e.peerConns, peerKey)
-		err := conn.Close()
-		if err != nil {
-			switch err.(type) {
-			case *peer.ConnectionAlreadyClosedError:
-				return nil
-			default:
-				return err
-			}
-		}
+		conn.Close()
 	}
-	return nil
-}
-
-func signalCandidate(candidate ice.Candidate, myKey wgtypes.Key, remoteKey wgtypes.Key, s signal.Client) error {
-	err := s.Send(&sProto.Message{
-		Key:       myKey.PublicKey().String(),
-		RemoteKey: remoteKey.String(),
-		Body: &sProto.Body{
-			Type:    sProto.Body_CANDIDATE,
-			Payload: candidate.Marshal(),
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func sendSignal(message *sProto.Message, s signal.Client) error {
-	return s.Send(message)
-}
-
-// SignalOfferAnswer signals either an offer or an answer to remote peer
-func SignalOfferAnswer(offerAnswer peer.OfferAnswer, myKey wgtypes.Key, remoteKey wgtypes.Key, s signal.Client, isAnswer bool) error {
-	var t sProto.Body_Type
-	if isAnswer {
-		t = sProto.Body_ANSWER
-	} else {
-		t = sProto.Body_OFFER
-	}
-
-	msg, err := signal.MarshalCredential(myKey, offerAnswer.WgListenPort, remoteKey, &signal.Credential{
-		UFrag: offerAnswer.IceCredentials.UFrag,
-		Pwd:   offerAnswer.IceCredentials.Pwd,
-	}, t)
-	if err != nil {
-		return err
-	}
-
-	err = s.Send(msg)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -429,28 +611,97 @@ func (e *Engine) handleSync(update *mgmProto.SyncResponse) error {
 	e.syncMsgMux.Lock()
 	defer e.syncMsgMux.Unlock()
 
-	if update.GetWiretrusteeConfig() != nil {
-		err := e.updateTURNs(update.GetWiretrusteeConfig().GetTurns())
+	if update.GetNetbirdConfig() != nil {
+		wCfg := update.GetNetbirdConfig()
+		err := e.updateTURNs(wCfg.GetTurns())
 		if err != nil {
-			return err
+			return fmt.Errorf("update TURNs: %w", err)
 		}
 
-		err = e.updateSTUNs(update.GetWiretrusteeConfig().GetStuns())
+		err = e.updateSTUNs(wCfg.GetStuns())
 		if err != nil {
-			return err
+			return fmt.Errorf("update STUNs: %w", err)
+		}
+
+		var stunTurn []*stun.URI
+		stunTurn = append(stunTurn, e.STUNs...)
+		stunTurn = append(stunTurn, e.TURNs...)
+		e.stunTurn.Store(stunTurn)
+
+		relayMsg := wCfg.GetRelay()
+		if relayMsg != nil {
+			// when we receive token we expect valid address list too
+			c := &auth.Token{
+				Payload:   relayMsg.GetTokenPayload(),
+				Signature: relayMsg.GetTokenSignature(),
+			}
+			if err := e.relayManager.UpdateToken(c); err != nil {
+				log.Errorf("failed to update relay token: %v", err)
+				return fmt.Errorf("update relay token: %w", err)
+			}
+
+			e.relayManager.UpdateServerURLs(relayMsg.Urls)
+
+			// Just in case the agent started with an MGM server where the relay was disabled but was later enabled.
+			// We can ignore all errors because the guard will manage the reconnection retries.
+			_ = e.relayManager.Serve()
+		} else {
+			e.relayManager.UpdateServerURLs(nil)
 		}
 
 		// todo update signal
 	}
 
-	if update.GetNetworkMap() != nil {
-		// only apply new changes and ignore old ones
-		err := e.updateNetworkMap(update.GetNetworkMap())
-		if err != nil {
-			return err
-		}
+	if err := e.updateChecksIfNew(update.Checks); err != nil {
+		return err
 	}
 
+	nm := update.GetNetworkMap()
+	if nm == nil {
+		return nil
+	}
+
+	// Store network map if persistence is enabled
+	if e.persistNetworkMap {
+		e.latestNetworkMap = nm
+		log.Debugf("network map persisted with serial %d", nm.GetSerial())
+	}
+
+	// only apply new changes and ignore old ones
+	if err := e.updateNetworkMap(nm); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// updateChecksIfNew updates checks if there are changes and sync new meta with management
+func (e *Engine) updateChecksIfNew(checks []*mgmProto.Checks) error {
+	// if checks are equal, we skip the update
+	if isChecksEqual(e.checks, checks) {
+		return nil
+	}
+	e.checks = checks
+
+	info, err := system.GetInfoWithChecks(e.ctx, checks)
+	if err != nil {
+		log.Warnf("failed to get system info with checks: %v", err)
+		info = system.GetInfo(e.ctx)
+	}
+	info.SetFlags(
+		e.config.RosenpassEnabled,
+		e.config.RosenpassPermissive,
+		&e.config.ServerSSHAllowed,
+		e.config.DisableClientRoutes,
+		e.config.DisableServerRoutes,
+		e.config.DisableDNS,
+		e.config.DisableFirewall,
+	)
+
+	if err := e.mgmClient.SyncMeta(info); err != nil {
+		log.Errorf("could not sync meta: error %s", err)
+		return err
+	}
 	return nil
 }
 
@@ -459,47 +710,63 @@ func isNil(server nbssh.Server) bool {
 }
 
 func (e *Engine) updateSSH(sshConf *mgmProto.SSHConfig) error {
-	if sshConf.GetSshEnabled() {
-		if runtime.GOOS == "windows" {
-			log.Warnf("running SSH server on Windows is not supported")
-			return nil
-		}
-		// start SSH server if it wasn't running
-		if isNil(e.sshServer) {
-			//nil sshServer means it has not yet been started
-			var err error
-			e.sshServer, err = e.sshServerFunc(e.config.SSHKey,
-				fmt.Sprintf("%s:%d", e.wgInterface.Address().IP.String(), nbssh.DefaultSSHPort))
-			if err != nil {
-				return err
+
+	if !e.config.ServerSSHAllowed {
+		log.Warnf("running SSH server is not permitted")
+		return nil
+	} else {
+
+		if sshConf.GetSshEnabled() {
+			if runtime.GOOS == "windows" {
+				log.Warnf("running SSH server on %s is not supported", runtime.GOOS)
+				return nil
 			}
-			go func() {
-				// blocking
-				err = e.sshServer.Start()
-				if err != nil {
-					// will throw error when we stop it even if it is a graceful stop
-					log.Debugf("stopped SSH server with error %v", err)
+			// start SSH server if it wasn't running
+			if isNil(e.sshServer) {
+				listenAddr := fmt.Sprintf("%s:%d", e.wgInterface.Address().IP.String(), nbssh.DefaultSSHPort)
+				if netstack.IsEnabled() {
+					listenAddr = fmt.Sprintf("127.0.0.1:%d", nbssh.DefaultSSHPort)
 				}
-				e.syncMsgMux.Lock()
-				defer e.syncMsgMux.Unlock()
-				e.sshServer = nil
-				log.Infof("stopped SSH server")
-			}()
-		} else {
-			log.Debugf("SSH server is already running")
+				// nil sshServer means it has not yet been started
+				var err error
+				e.sshServer, err = e.sshServerFunc(e.config.SSHKey, listenAddr)
+
+				if err != nil {
+					return fmt.Errorf("create ssh server: %w", err)
+				}
+				go func() {
+					// blocking
+					err = e.sshServer.Start()
+					if err != nil {
+						// will throw error when we stop it even if it is a graceful stop
+						log.Debugf("stopped SSH server with error %v", err)
+					}
+					e.syncMsgMux.Lock()
+					defer e.syncMsgMux.Unlock()
+					e.sshServer = nil
+					log.Infof("stopped SSH server")
+				}()
+			} else {
+				log.Debugf("SSH server is already running")
+			}
+		} else if !isNil(e.sshServer) {
+			// Disable SSH server request, so stop it if it was running
+			err := e.sshServer.Stop()
+			if err != nil {
+				log.Warnf("failed to stop SSH server %v", err)
+			}
+			e.sshServer = nil
 		}
-	} else if !isNil(e.sshServer) {
-		// Disable SSH server request, so stop it if it was running
-		err := e.sshServer.Stop()
-		if err != nil {
-			log.Warnf("failed to stop SSH server %v", err)
-		}
-		e.sshServer = nil
+		return nil
+
 	}
-	return nil
 }
 
 func (e *Engine) updateConfig(conf *mgmProto.PeerConfig) error {
+	if e.wgInterface == nil {
+		return errors.New("wireguard interface is not initialized")
+	}
+
 	if e.wgInterface.Address().String() != conf.Address {
 		oldAddr := e.wgInterface.Address().String()
 		log.Debugf("updating peer address from %s to %s", oldAddr, conf.Address)
@@ -514,16 +781,17 @@ func (e *Engine) updateConfig(conf *mgmProto.PeerConfig) error {
 	if conf.GetSshConfig() != nil {
 		err := e.updateSSH(conf.GetSshConfig())
 		if err != nil {
-			log.Warnf("failed handling SSH server setup %v", e)
+			log.Warnf("failed handling SSH server setup: %v", err)
 		}
 	}
 
-	e.statusRecorder.UpdateLocalPeerState(peer.LocalPeerState{
-		IP:              e.config.WgAddr,
-		PubKey:          e.config.WgPrivateKey.PublicKey().String(),
-		KernelInterface: iface.WireGuardModuleIsLoaded(),
-		FQDN:            conf.GetFqdn(),
-	})
+	state := e.statusRecorder.GetLocalPeerState()
+	state.IP = e.config.WgAddr
+	state.PubKey = e.config.WgPrivateKey.PublicKey().String()
+	state.KernelInterface = device.WireGuardModuleIsLoaded()
+	state.FQDN = conf.GetFqdn()
+
+	e.statusRecorder.UpdateLocalPeerState(state)
 
 	return nil
 }
@@ -532,14 +800,28 @@ func (e *Engine) updateConfig(conf *mgmProto.PeerConfig) error {
 // E.g. when a new peer has been registered and we are allowed to connect to it.
 func (e *Engine) receiveManagementEvents() {
 	go func() {
-		err := e.mgmClient.Sync(func(update *mgmProto.SyncResponse) error {
-			return e.handleSync(update)
-		})
+		info, err := system.GetInfoWithChecks(e.ctx, e.checks)
+		if err != nil {
+			log.Warnf("failed to get system info with checks: %v", err)
+			info = system.GetInfo(e.ctx)
+		}
+		info.SetFlags(
+			e.config.RosenpassEnabled,
+			e.config.RosenpassPermissive,
+			&e.config.ServerSSHAllowed,
+			e.config.DisableClientRoutes,
+			e.config.DisableServerRoutes,
+			e.config.DisableDNS,
+			e.config.DisableFirewall,
+		)
+
+		// err = e.mgmClient.Sync(info, e.handleSync)
+		err = e.mgmClient.Sync(e.ctx, info, e.handleSync)
 		if err != nil {
 			// happens if management is unavailable for a long time.
 			// We want to cancel the operation of the whole client
 			_ = CtxGetState(e.ctx).Wrap(ErrResetConnection)
-			e.cancel()
+			e.clientCancel()
 			return
 		}
 		log.Debugf("stopped receiving updates from Management Service")
@@ -551,10 +833,10 @@ func (e *Engine) updateSTUNs(stuns []*mgmProto.HostConfig) error {
 	if len(stuns) == 0 {
 		return nil
 	}
-	var newSTUNs []*ice.URL
+	var newSTUNs []*stun.URI
 	log.Debugf("got STUNs update from Management Service, updating")
-	for _, stun := range stuns {
-		url, err := ice.ParseURL(stun.Uri)
+	for _, s := range stuns {
+		url, err := stun.ParseURI(s.Uri)
 		if err != nil {
 			return err
 		}
@@ -569,10 +851,10 @@ func (e *Engine) updateTURNs(turns []*mgmProto.ProtectedHostConfig) error {
 	if len(turns) == 0 {
 		return nil
 	}
-	var newTURNs []*ice.URL
+	var newTURNs []*stun.URI
 	log.Debugf("got TURNs update from Management Service, updating")
 	for _, turn := range turns {
-		url, err := ice.ParseURL(turn.HostConfig.Uri)
+		url, err := stun.ParseURI(turn.HostConfig.Uri)
 		if err != nil {
 			return err
 		}
@@ -586,7 +868,6 @@ func (e *Engine) updateTURNs(turns []*mgmProto.ProtectedHostConfig) error {
 }
 
 func (e *Engine) updateNetworkMap(networkMap *mgmProto.NetworkMap) error {
-
 	// intentionally leave it before checking serial because for now it can happen that peer IP changed but serial didn't
 	if networkMap.GetPeerConfig() != nil {
 		err := e.updateConfig(networkMap.GetPeerConfig())
@@ -599,6 +880,29 @@ func (e *Engine) updateNetworkMap(networkMap *mgmProto.NetworkMap) error {
 	if e.networkSerial > serial {
 		log.Debugf("received outdated NetworkMap with serial %d, ignoring", serial)
 		return nil
+	}
+
+	// Apply ACLs in the beginning to avoid security leaks
+	if e.acl != nil {
+		e.acl.ApplyFiltering(networkMap)
+	}
+
+	if e.firewall != nil {
+		if localipfw, ok := e.firewall.(localIpUpdater); ok {
+			if err := localipfw.UpdateLocalIPs(); err != nil {
+				log.Errorf("failed to update local IPs: %v", err)
+			}
+		}
+	}
+
+	// DNS forwarder
+	dnsRouteFeatureFlag := toDNSFeatureFlag(networkMap)
+	dnsRouteDomains := toRouteDomains(e.config.WgPrivateKey.PublicKey().String(), networkMap.GetRoutes())
+	e.updateDNSForwarder(dnsRouteFeatureFlag, dnsRouteDomains)
+
+	routes := toRoutes(networkMap.GetRoutes())
+	if err := e.routeManager.UpdateRoutes(serial, routes, dnsRouteFeatureFlag); err != nil {
+		log.Errorf("failed to update clientRoutes, err: %v", err)
 	}
 
 	log.Debugf("got peers update from Management Service, total peers to connect to = %d", len(networkMap.GetRemotePeers()))
@@ -642,48 +946,79 @@ func (e *Engine) updateNetworkMap(networkMap *mgmProto.NetworkMap) error {
 			}
 		}
 	}
-	protoRoutes := networkMap.GetRoutes()
-	if protoRoutes == nil {
-		protoRoutes = []*mgmProto.Route{}
-	}
-	err := e.routeManager.UpdateRoutes(serial, toRoutes(protoRoutes))
-	if err != nil {
-		log.Errorf("failed to update routes, err: %v", err)
-	}
 
 	protoDNSConfig := networkMap.GetDNSConfig()
 	if protoDNSConfig == nil {
 		protoDNSConfig = &mgmProto.DNSConfig{}
 	}
 
-	err = e.dnsServer.UpdateDNSServer(serial, toDNSConfig(protoDNSConfig))
-	if err != nil {
+	if err := e.dnsServer.UpdateDNSServer(serial, toDNSConfig(protoDNSConfig)); err != nil {
 		log.Errorf("failed to update dns server, err: %v", err)
 	}
 
-	if e.acl != nil {
-		e.acl.ApplyFiltering(networkMap)
-	}
 	e.networkSerial = serial
+
+	// Test received (upstream) servers for availability right away instead of upon usage.
+	// If no server of a server group responds this will disable the respective handler and retry later.
+	e.dnsServer.ProbeAvailability()
+
 	return nil
 }
 
+func toDNSFeatureFlag(networkMap *mgmProto.NetworkMap) bool {
+	if networkMap.PeerConfig != nil {
+		return networkMap.PeerConfig.RoutingPeerDnsResolutionEnabled
+	}
+	return false
+}
+
 func toRoutes(protoRoutes []*mgmProto.Route) []*route.Route {
+	if protoRoutes == nil {
+		protoRoutes = []*mgmProto.Route{}
+	}
+
 	routes := make([]*route.Route, 0)
 	for _, protoRoute := range protoRoutes {
-		_, prefix, _ := route.ParseNetwork(protoRoute.Network)
+		var prefix netip.Prefix
+		if len(protoRoute.Domains) == 0 {
+			var err error
+			if prefix, err = netip.ParsePrefix(protoRoute.Network); err != nil {
+				log.Errorf("Failed to parse prefix %s: %v", protoRoute.Network, err)
+				continue
+			}
+		}
+
 		convertedRoute := &route.Route{
-			ID:          protoRoute.ID,
+			ID:          route.ID(protoRoute.ID),
 			Network:     prefix,
-			NetID:       protoRoute.NetID,
+			Domains:     domain.FromPunycodeList(protoRoute.Domains),
+			NetID:       route.NetID(protoRoute.NetID),
 			NetworkType: route.NetworkType(protoRoute.NetworkType),
 			Peer:        protoRoute.Peer,
 			Metric:      int(protoRoute.Metric),
 			Masquerade:  protoRoute.Masquerade,
+			KeepRoute:   protoRoute.KeepRoute,
 		}
 		routes = append(routes, convertedRoute)
 	}
 	return routes
+}
+
+func toRouteDomains(myPubKey string, protoRoutes []*mgmProto.Route) []string {
+	if protoRoutes == nil {
+		protoRoutes = []*mgmProto.Route{}
+	}
+
+	var dnsRoutes []string
+	for _, protoRoute := range protoRoutes {
+		if len(protoRoute.Domains) == 0 {
+			continue
+		}
+		if protoRoute.Peer == myPubKey {
+			dnsRoutes = append(dnsRoutes, protoRoute.Domains...)
+		}
+	}
+	return dnsRoutes
 }
 
 func toDNSConfig(protoDNSConfig *mgmProto.DNSConfig) nbdns.Config {
@@ -739,6 +1074,7 @@ func (e *Engine) updateOfflinePeers(offlinePeers []*mgmProto.RemotePeerConfig) {
 			FQDN:             offlinePeer.GetFqdn(),
 			ConnStatus:       peer.StatusDisconnected,
 			ConnStatusUpdate: time.Now(),
+			Mux:              new(sync.RWMutex),
 		}
 	}
 	e.statusRecorder.ReplaceOfflinePeers(replacement)
@@ -759,72 +1095,34 @@ func (e *Engine) addNewPeers(peersUpdate []*mgmProto.RemotePeerConfig) error {
 func (e *Engine) addNewPeer(peerConfig *mgmProto.RemotePeerConfig) error {
 	peerKey := peerConfig.GetWgPubKey()
 	peerIPs := peerConfig.GetAllowedIps()
-	if _, ok := e.peerConns[peerKey]; !ok {
+	if _, ok := e.peerStore.PeerConn(peerKey); !ok {
 		conn, err := e.createPeerConn(peerKey, strings.Join(peerIPs, ","))
 		if err != nil {
-			return err
+			return fmt.Errorf("create peer connection: %w", err)
 		}
-		e.peerConns[peerKey] = conn
+
+		if ok := e.peerStore.AddPeerConn(peerKey, conn); !ok {
+			conn.Close()
+			return fmt.Errorf("peer already exists: %s", peerKey)
+		}
+
+		if e.beforePeerHook != nil && e.afterPeerHook != nil {
+			conn.AddBeforeAddPeerHook(e.beforePeerHook)
+			conn.AddAfterRemovePeerHook(e.afterPeerHook)
+		}
 
 		err = e.statusRecorder.AddPeer(peerKey, peerConfig.Fqdn)
 		if err != nil {
 			log.Warnf("error adding peer %s to status recorder, got error: %v", peerKey, err)
 		}
 
-		go e.connWorker(conn, peerKey)
+		conn.Open()
 	}
 	return nil
 }
 
-func (e *Engine) connWorker(conn *peer.Conn, peerKey string) {
-	for {
-
-		// randomize starting time a bit
-		min := 500
-		max := 2000
-		time.Sleep(time.Duration(rand.Intn(max-min)+min) * time.Millisecond)
-
-		// if peer has been removed -> give up
-		if !e.peerExists(peerKey) {
-			log.Debugf("peer %s doesn't exist anymore, won't retry connection", peerKey)
-			return
-		}
-
-		if !e.signal.Ready() {
-			log.Infof("signal client isn't ready, skipping connection attempt %s", peerKey)
-			continue
-		}
-
-		// we might have received new STUN and TURN servers meanwhile, so update them
-		e.syncMsgMux.Lock()
-		conn.UpdateStunTurn(append(e.STUNs, e.TURNs...))
-		e.syncMsgMux.Unlock()
-
-		err := conn.Open()
-		if err != nil {
-			log.Debugf("connection to peer %s failed: %v", peerKey, err)
-			switch err.(type) {
-			case *peer.ConnectionClosedError:
-				// conn has been forced to close, so we exit the loop
-				return
-			default:
-			}
-		}
-	}
-}
-
-func (e *Engine) peerExists(peerKey string) bool {
-	e.syncMsgMux.Lock()
-	defer e.syncMsgMux.Unlock()
-	_, ok := e.peerConns[peerKey]
-	return ok
-}
-
 func (e *Engine) createPeerConn(pubKey string, allowedIPs string) (*peer.Conn, error) {
 	log.Debugf("creating peer connection %s", pubKey)
-	var stunTurn []*ice.URL
-	stunTurn = append(stunTurn, e.STUNs...)
-	stunTurn = append(stunTurn, e.TURNs...)
 
 	wgConfig := peer.WgConfig{
 		RemoteKey:    pubKey,
@@ -834,51 +1132,55 @@ func (e *Engine) createPeerConn(pubKey string, allowedIPs string) (*peer.Conn, e
 		PreSharedKey: e.config.PreSharedKey,
 	}
 
+	if e.config.RosenpassEnabled && !e.config.RosenpassPermissive {
+		lk := []byte(e.config.WgPrivateKey.PublicKey().String())
+		rk := []byte(wgConfig.RemoteKey)
+		var keyInput []byte
+		if string(lk) > string(rk) {
+			//nolint:gocritic
+			keyInput = append(lk[:16], rk[:16]...)
+		} else {
+			//nolint:gocritic
+			keyInput = append(rk[:16], lk[:16]...)
+		}
+
+		key, err := wgtypes.NewKey(keyInput)
+		if err != nil {
+			return nil, err
+		}
+
+		wgConfig.PreSharedKey = &key
+	}
+
 	// randomize connection timeout
 	timeout := time.Duration(rand.Intn(PeerConnectionTimeoutMax-PeerConnectionTimeoutMin)+PeerConnectionTimeoutMin) * time.Millisecond
 	config := peer.ConnConfig{
-		Key:                  pubKey,
-		LocalKey:             e.config.WgPrivateKey.PublicKey().String(),
-		StunTurn:             stunTurn,
-		InterfaceBlackList:   e.config.IFaceBlackList,
-		DisableIPv6Discovery: e.config.DisableIPv6Discovery,
-		Timeout:              timeout,
-		UDPMux:               e.udpMux.UDPMuxDefault,
-		UDPMuxSrflx:          e.udpMux,
-		WgConfig:             wgConfig,
-		LocalWgPort:          e.config.WgPort,
-		NATExternalIPs:       e.parseNATExternalIPMappings(),
-		UserspaceBind:        e.wgInterface.IsUserspaceBind(),
+		Key:             pubKey,
+		LocalKey:        e.config.WgPrivateKey.PublicKey().String(),
+		Timeout:         timeout,
+		WgConfig:        wgConfig,
+		LocalWgPort:     e.config.WgPort,
+		RosenpassPubKey: e.getRosenpassPubKey(),
+		RosenpassAddr:   e.getRosenpassAddr(),
+		ICEConfig: icemaker.Config{
+			StunTurn:             &e.stunTurn,
+			InterfaceBlackList:   e.config.IFaceBlackList,
+			DisableIPv6Discovery: e.config.DisableIPv6Discovery,
+			UDPMux:               e.udpMux.UDPMuxDefault,
+			UDPMuxSrflx:          e.udpMux,
+			NATExternalIPs:       e.parseNATExternalIPMappings(),
+		},
 	}
 
-	peerConn, err := peer.NewConn(config, e.statusRecorder, e.wgProxyFactory, e.mobileDep.TunAdapter, e.mobileDep.IFaceDiscover)
+	peerConn, err := peer.NewConn(e.ctx, config, e.statusRecorder, e.signaler, e.mobileDep.IFaceDiscover, e.relayManager, e.srWatcher, e.connSemaphore)
 	if err != nil {
 		return nil, err
 	}
 
-	wgPubKey, err := wgtypes.ParseKey(pubKey)
-	if err != nil {
-		return nil, err
+	if e.rpManager != nil {
+		peerConn.SetOnConnected(e.rpManager.OnConnected)
+		peerConn.SetOnDisconnected(e.rpManager.OnDisconnected)
 	}
-
-	signalOffer := func(offerAnswer peer.OfferAnswer) error {
-		return SignalOfferAnswer(offerAnswer, e.config.WgPrivateKey, wgPubKey, e.signal, false)
-	}
-
-	signalCandidate := func(candidate ice.Candidate) error {
-		return signalCandidate(candidate, e.config.WgPrivateKey, wgPubKey, e.signal)
-	}
-
-	signalAnswer := func(offerAnswer peer.OfferAnswer) error {
-		return SignalOfferAnswer(offerAnswer, e.config.WgPrivateKey, wgPubKey, e.signal, true)
-	}
-
-	peerConn.SetSignalCandidate(signalCandidate)
-	peerConn.SetSignalOffer(signalOffer)
-	peerConn.SetSignalAnswer(signalAnswer)
-	peerConn.SetSendSignalMessage(func(message *sProto.Message) error {
-		return sendSignal(message, e.signal)
-	})
 
 	return peerConn, nil
 }
@@ -887,12 +1189,12 @@ func (e *Engine) createPeerConn(pubKey string, allowedIPs string) (*peer.Conn, e
 func (e *Engine) receiveSignalEvents() {
 	go func() {
 		// connect to a stream of messages coming from the signal server
-		err := e.signal.Receive(func(msg *sProto.Message) error {
+		err := e.signal.Receive(e.ctx, func(msg *sProto.Message) error {
 			e.syncMsgMux.Lock()
 			defer e.syncMsgMux.Unlock()
 
-			conn := e.peerConns[msg.Key]
-			if conn == nil {
+			conn, ok := e.peerStore.PeerConn(msg.Key)
+			if !ok {
 				return fmt.Errorf("wrongly addressed message %s", msg.Key)
 			}
 
@@ -903,15 +1205,22 @@ func (e *Engine) receiveSignalEvents() {
 					return err
 				}
 
-				conn.RegisterProtoSupportMeta(msg.Body.GetFeaturesSupported())
-
+				var rosenpassPubKey []byte
+				rosenpassAddr := ""
+				if msg.GetBody().GetRosenpassConfig() != nil {
+					rosenpassPubKey = msg.GetBody().GetRosenpassConfig().GetRosenpassPubKey()
+					rosenpassAddr = msg.GetBody().GetRosenpassConfig().GetRosenpassServerAddr()
+				}
 				conn.OnRemoteOffer(peer.OfferAnswer{
 					IceCredentials: peer.IceCredentials{
 						UFrag: remoteCred.UFrag,
 						Pwd:   remoteCred.Pwd,
 					},
-					WgListenPort: int(msg.GetBody().GetWgListenPort()),
-					Version:      msg.GetBody().GetNetBirdVersion(),
+					WgListenPort:    int(msg.GetBody().GetWgListenPort()),
+					Version:         msg.GetBody().GetNetBirdVersion(),
+					RosenpassPubKey: rosenpassPubKey,
+					RosenpassAddr:   rosenpassAddr,
+					RelaySrvAddress: msg.GetBody().GetRelayServerAddress(),
 				})
 			case sProto.Body_ANSWER:
 				remoteCred, err := signal.UnMarshalCredential(msg)
@@ -919,15 +1228,22 @@ func (e *Engine) receiveSignalEvents() {
 					return err
 				}
 
-				conn.RegisterProtoSupportMeta(msg.Body.GetFeaturesSupported())
-
+				var rosenpassPubKey []byte
+				rosenpassAddr := ""
+				if msg.GetBody().GetRosenpassConfig() != nil {
+					rosenpassPubKey = msg.GetBody().GetRosenpassConfig().GetRosenpassPubKey()
+					rosenpassAddr = msg.GetBody().GetRosenpassConfig().GetRosenpassServerAddr()
+				}
 				conn.OnRemoteAnswer(peer.OfferAnswer{
 					IceCredentials: peer.IceCredentials{
 						UFrag: remoteCred.UFrag,
 						Pwd:   remoteCred.Pwd,
 					},
-					WgListenPort: int(msg.GetBody().GetWgListenPort()),
-					Version:      msg.GetBody().GetNetBirdVersion(),
+					WgListenPort:    int(msg.GetBody().GetWgListenPort()),
+					Version:         msg.GetBody().GetNetBirdVersion(),
+					RosenpassPubKey: rosenpassPubKey,
+					RosenpassAddr:   rosenpassAddr,
+					RelaySrvAddress: msg.GetBody().GetRelayServerAddress(),
 				})
 			case sProto.Body_CANDIDATE:
 				candidate, err := ice.UnmarshalCandidate(msg.GetBody().Payload)
@@ -935,7 +1251,8 @@ func (e *Engine) receiveSignalEvents() {
 					log.Errorf("failed on parsing remote candidate %s -> %s", candidate, err)
 					return err
 				}
-				conn.OnRemoteCandidate(candidate)
+
+				go conn.OnRemoteCandidate(candidate, e.routeManager.GetClientRoutes())
 			case sProto.Body_MODE:
 			}
 
@@ -945,7 +1262,7 @@ func (e *Engine) receiveSignalEvents() {
 			// happens if signal is unavailable for a long time.
 			// We want to cancel the operation of the whole client
 			_ = CtxGetState(e.ctx).Wrap(ErrResetConnection)
-			e.cancel()
+			e.clientCancel()
 			return
 		}
 	}()
@@ -1006,27 +1323,12 @@ func (e *Engine) parseNATExternalIPMappings() []string {
 }
 
 func (e *Engine) close() {
-	if err := e.wgProxyFactory.Free(); err != nil {
-		log.Errorf("failed closing ebpf proxy: %s", err)
-	}
-
 	log.Debugf("removing Netbird interface %s", e.config.WgIfaceName)
 	if e.wgInterface != nil {
 		if err := e.wgInterface.Close(); err != nil {
 			log.Errorf("failed closing Netbird interface %s %v", e.config.WgIfaceName, err)
 		}
-	}
-
-	if e.udpMux != nil {
-		if err := e.udpMux.Close(); err != nil {
-			log.Debugf("close udp mux: %v", err)
-		}
-	}
-
-	if e.udpMuxConn != nil {
-		if err := e.udpMuxConn.Close(); err != nil {
-			log.Debugf("close udp mux connection: %v", err)
-		}
+		e.wgInterface = nil
 	}
 
 	if !isNil(e.sshServer) {
@@ -1036,27 +1338,129 @@ func (e *Engine) close() {
 		}
 	}
 
-	if e.routeManager != nil {
-		e.routeManager.Stop()
+	if e.firewall != nil {
+		err := e.firewall.Reset(e.stateManager)
+		if err != nil {
+			log.Warnf("failed to reset firewall: %s", err)
+		}
 	}
 
-	if e.dnsServer != nil {
-		e.dnsServer.Stop()
-	}
-
-	if e.acl != nil {
-		e.acl.Stop()
+	if e.rpManager != nil {
+		_ = e.rpManager.Close()
 	}
 }
 
 func (e *Engine) readInitialSettings() ([]*route.Route, *nbdns.Config, error) {
-	netMap, err := e.mgmClient.GetNetworkMap()
+	info := system.GetInfo(e.ctx)
+	info.SetFlags(
+		e.config.RosenpassEnabled,
+		e.config.RosenpassPermissive,
+		&e.config.ServerSSHAllowed,
+		e.config.DisableClientRoutes,
+		e.config.DisableServerRoutes,
+		e.config.DisableDNS,
+		e.config.DisableFirewall,
+	)
+
+	netMap, err := e.mgmClient.GetNetworkMap(info)
 	if err != nil {
 		return nil, nil, err
 	}
 	routes := toRoutes(netMap.GetRoutes())
 	dnsCfg := toDNSConfig(netMap.GetDNSConfig())
 	return routes, &dnsCfg, nil
+}
+
+func (e *Engine) newWgIface() (*iface.WGIface, error) {
+	transportNet, err := e.newStdNet()
+	if err != nil {
+		log.Errorf("failed to create pion's stdnet: %s", err)
+	}
+
+	opts := iface.WGIFaceOpts{
+		IFaceName:    e.config.WgIfaceName,
+		Address:      e.config.WgAddr,
+		WGPort:       e.config.WgPort,
+		WGPrivKey:    e.config.WgPrivateKey.String(),
+		MTU:          iface.DefaultMTU,
+		TransportNet: transportNet,
+		FilterFn:     e.addrViaRoutes,
+	}
+
+	switch runtime.GOOS {
+	case "android":
+		opts.MobileArgs = &device.MobileIFaceArguments{
+			TunAdapter: e.mobileDep.TunAdapter,
+			TunFd:      int(e.mobileDep.FileDescriptor),
+		}
+	case "ios":
+		opts.MobileArgs = &device.MobileIFaceArguments{
+			TunFd: int(e.mobileDep.FileDescriptor),
+		}
+	}
+
+	return iface.NewWGIFace(opts)
+}
+
+func (e *Engine) wgInterfaceCreate() (err error) {
+	switch runtime.GOOS {
+	case "android":
+		err = e.wgInterface.CreateOnAndroid(e.routeManager.InitialRouteRange(), e.dnsServer.DnsIP(), e.dnsServer.SearchDomains())
+	case "ios":
+		e.mobileDep.NetworkChangeListener.SetInterfaceIP(e.config.WgAddr)
+		err = e.wgInterface.Create()
+	default:
+		err = e.wgInterface.Create()
+	}
+	return err
+}
+
+func (e *Engine) newDnsServer() ([]*route.Route, dns.Server, error) {
+	// due to tests where we are using a mocked version of the DNS server
+	if e.dnsServer != nil {
+		return nil, e.dnsServer, nil
+	}
+
+	switch runtime.GOOS {
+	case "android":
+		routes, dnsConfig, err := e.readInitialSettings()
+		if err != nil {
+			return nil, nil, err
+		}
+		dnsServer := dns.NewDefaultServerPermanentUpstream(
+			e.ctx,
+			e.wgInterface,
+			e.mobileDep.HostDNSAddresses,
+			*dnsConfig,
+			e.mobileDep.NetworkChangeListener,
+			e.statusRecorder,
+			e.config.DisableDNS,
+		)
+		go e.mobileDep.DnsReadyListener.OnReady()
+		return routes, dnsServer, nil
+
+	case "ios":
+		dnsServer := dns.NewDefaultServerIos(e.ctx, e.wgInterface, e.mobileDep.DnsManager, e.statusRecorder, e.config.DisableDNS)
+		return nil, dnsServer, nil
+
+	default:
+		dnsServer, err := dns.NewDefaultServer(e.ctx, e.wgInterface, e.config.CustomDNSAddress, e.statusRecorder, e.stateManager, e.config.DisableDNS)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return nil, dnsServer, nil
+	}
+}
+
+// GetRouteManager returns the route manager
+func (e *Engine) GetRouteManager() routemanager.Manager {
+	return e.routeManager
+}
+
+// GetFirewallManager returns the firewall manager
+func (e *Engine) GetFirewallManager() manager.Manager {
+	return e.firewall
 }
 
 func findIPFromInterfaceName(ifaceName string) (net.IP, error) {
@@ -1078,4 +1482,296 @@ func findIPFromInterface(iface *net.Interface) (net.IP, error) {
 		}
 	}
 	return nil, fmt.Errorf("interface %s don't have an ipv4 address", iface.Name)
+}
+
+func (e *Engine) getRosenpassPubKey() []byte {
+	if e.rpManager != nil {
+		return e.rpManager.GetPubKey()
+	}
+	return nil
+}
+
+func (e *Engine) getRosenpassAddr() string {
+	if e.rpManager != nil {
+		return e.rpManager.GetAddress().String()
+	}
+	return ""
+}
+
+// RunHealthProbes executes health checks for Signal, Management, Relay and WireGuard services
+// and updates the status recorder with the latest states.
+func (e *Engine) RunHealthProbes() bool {
+	signalHealthy := e.signal.IsHealthy()
+	log.Debugf("signal health check: healthy=%t", signalHealthy)
+
+	managementHealthy := e.mgmClient.IsHealthy()
+	log.Debugf("management health check: healthy=%t", managementHealthy)
+
+	results := append(e.probeSTUNs(), e.probeTURNs()...)
+	e.statusRecorder.UpdateRelayStates(results)
+
+	relayHealthy := true
+	for _, res := range results {
+		if res.Err != nil {
+			relayHealthy = false
+			break
+		}
+	}
+	log.Debugf("relay health check: healthy=%t", relayHealthy)
+
+	for _, key := range e.peerStore.PeersPubKey() {
+		wgStats, err := e.wgInterface.GetStats(key)
+		if err != nil {
+			log.Debugf("failed to get wg stats for peer %s: %s", key, err)
+			continue
+		}
+		// wgStats could be zero value, in which case we just reset the stats
+		if err := e.statusRecorder.UpdateWireGuardPeerState(key, wgStats); err != nil {
+			log.Debugf("failed to update wg stats for peer %s: %s", key, err)
+		}
+	}
+
+	allHealthy := signalHealthy && managementHealthy && relayHealthy
+	log.Debugf("all health checks completed: healthy=%t", allHealthy)
+	return allHealthy
+}
+
+func (e *Engine) probeSTUNs() []relay.ProbeResult {
+	e.syncMsgMux.Lock()
+	stuns := slices.Clone(e.STUNs)
+	e.syncMsgMux.Unlock()
+
+	return relay.ProbeAll(e.ctx, relay.ProbeSTUN, stuns)
+}
+
+func (e *Engine) probeTURNs() []relay.ProbeResult {
+	e.syncMsgMux.Lock()
+	turns := slices.Clone(e.TURNs)
+	e.syncMsgMux.Unlock()
+
+	return relay.ProbeAll(e.ctx, relay.ProbeTURN, turns)
+}
+
+func (e *Engine) restartEngine() {
+	log.Info("restarting engine")
+	CtxGetState(e.ctx).Set(StatusConnecting)
+
+	if err := e.Stop(); err != nil {
+		log.Errorf("Failed to stop engine: %v", err)
+	}
+
+	_ = CtxGetState(e.ctx).Wrap(ErrResetConnection)
+	log.Infof("cancelling client, engine will be recreated")
+	e.clientCancel()
+}
+
+func (e *Engine) startNetworkMonitor() {
+	if !e.config.NetworkMonitor {
+		log.Infof("Network monitor is disabled, not starting")
+		return
+	}
+
+	e.networkMonitor = networkmonitor.New()
+	go func() {
+		var mu sync.Mutex
+		var debounceTimer *time.Timer
+
+		// Start the network monitor with a callback, Start will block until the monitor is stopped,
+		// a network change is detected, or an error occurs on start up
+		err := e.networkMonitor.Start(e.ctx, func() {
+			// This function is called when a network change is detected
+			mu.Lock()
+			defer mu.Unlock()
+
+			if debounceTimer != nil {
+				log.Infof("Network monitor: detected network change, reset debounceTimer")
+				debounceTimer.Stop()
+			}
+
+			// Set a new timer to debounce rapid network changes
+			debounceTimer = time.AfterFunc(2*time.Second, func() {
+				// This function is called after the debounce period
+				mu.Lock()
+				defer mu.Unlock()
+
+				log.Infof("Network monitor: detected network change, restarting engine")
+				e.restartEngine()
+			})
+		})
+		if err != nil && !errors.Is(err, networkmonitor.ErrStopped) {
+			log.Errorf("Network monitor: %v", err)
+		}
+	}()
+}
+
+func (e *Engine) addrViaRoutes(addr netip.Addr) (bool, netip.Prefix, error) {
+	var vpnRoutes []netip.Prefix
+	for _, routes := range e.routeManager.GetClientRoutes() {
+		if len(routes) > 0 && routes[0] != nil {
+			vpnRoutes = append(vpnRoutes, routes[0].Network)
+		}
+	}
+
+	if isVpn, prefix := systemops.IsAddrRouted(addr, vpnRoutes); isVpn {
+		return true, prefix, nil
+	}
+
+	return false, netip.Prefix{}, nil
+}
+
+func (e *Engine) stopDNSServer() {
+	if e.dnsServer == nil {
+		return
+	}
+	e.dnsServer.Stop()
+	e.dnsServer = nil
+	err := fmt.Errorf("DNS server stopped")
+	nsGroupStates := e.statusRecorder.GetDNSStates()
+	for i := range nsGroupStates {
+		nsGroupStates[i].Enabled = false
+		nsGroupStates[i].Error = err
+	}
+	e.statusRecorder.UpdateDNSStates(nsGroupStates)
+}
+
+// SetNetworkMapPersistence enables or disables network map persistence
+func (e *Engine) SetNetworkMapPersistence(enabled bool) {
+	e.syncMsgMux.Lock()
+	defer e.syncMsgMux.Unlock()
+
+	if enabled == e.persistNetworkMap {
+		return
+	}
+	e.persistNetworkMap = enabled
+	log.Debugf("Network map persistence is set to %t", enabled)
+
+	if !enabled {
+		e.latestNetworkMap = nil
+	}
+}
+
+// GetLatestNetworkMap returns the stored network map if persistence is enabled
+func (e *Engine) GetLatestNetworkMap() (*mgmProto.NetworkMap, error) {
+	e.syncMsgMux.Lock()
+	defer e.syncMsgMux.Unlock()
+
+	if !e.persistNetworkMap {
+		return nil, errors.New("network map persistence is disabled")
+	}
+
+	if e.latestNetworkMap == nil {
+		//nolint:nilnil
+		return nil, nil
+	}
+
+	log.Debugf("Retrieving latest network map with size %d bytes", proto.Size(e.latestNetworkMap))
+	nm, ok := proto.Clone(e.latestNetworkMap).(*mgmProto.NetworkMap)
+	if !ok {
+
+		return nil, fmt.Errorf("failed to clone network map")
+	}
+
+	return nm, nil
+}
+
+// GetWgAddr returns the wireguard address
+func (e *Engine) GetWgAddr() net.IP {
+	if e.wgInterface == nil {
+		return nil
+	}
+	return e.wgInterface.Address().IP
+}
+
+// updateDNSForwarder start or stop the DNS forwarder based on the domains and the feature flag
+func (e *Engine) updateDNSForwarder(enabled bool, domains []string) {
+	if !enabled {
+		if e.dnsForwardMgr == nil {
+			return
+		}
+		if err := e.dnsForwardMgr.Stop(context.Background()); err != nil {
+			log.Errorf("failed to stop DNS forward: %v", err)
+		}
+		return
+	}
+
+	if len(domains) > 0 {
+		log.Infof("enable domain router service for domains: %v", domains)
+		if e.dnsForwardMgr == nil {
+			e.dnsForwardMgr = dnsfwd.NewManager(e.firewall)
+
+			if err := e.dnsForwardMgr.Start(domains); err != nil {
+				log.Errorf("failed to start DNS forward: %v", err)
+				e.dnsForwardMgr = nil
+			}
+		} else {
+			log.Infof("update domain router service for domains: %v", domains)
+			e.dnsForwardMgr.UpdateDomains(domains)
+		}
+	} else if e.dnsForwardMgr != nil {
+		log.Infof("disable domain router service")
+		if err := e.dnsForwardMgr.Stop(context.Background()); err != nil {
+			log.Errorf("failed to stop DNS forward: %v", err)
+		}
+		e.dnsForwardMgr = nil
+	}
+}
+
+// isChecksEqual checks if two slices of checks are equal.
+func isChecksEqual(checks []*mgmProto.Checks, oChecks []*mgmProto.Checks) bool {
+	for _, check := range checks {
+		sort.Slice(check.Files, func(i, j int) bool {
+			return check.Files[i] < check.Files[j]
+		})
+	}
+	for _, oCheck := range oChecks {
+		sort.Slice(oCheck.Files, func(i, j int) bool {
+			return oCheck.Files[i] < oCheck.Files[j]
+		})
+	}
+
+	return slices.EqualFunc(checks, oChecks, func(checks, oChecks *mgmProto.Checks) bool {
+		return slices.Equal(checks.Files, oChecks.Files)
+	})
+}
+
+func getInterfacePrefixes() ([]netip.Prefix, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("get interfaces: %w", err)
+	}
+
+	var prefixes []netip.Prefix
+	var merr *multierror.Error
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("get addresses for interface %s: %w", iface.Name, err))
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				merr = multierror.Append(merr, fmt.Errorf("cast address to IPNet: %v", addr))
+				continue
+			}
+			addr, ok := netip.AddrFromSlice(ipNet.IP)
+			if !ok {
+				merr = multierror.Append(merr, fmt.Errorf("cast IPNet to netip.Addr: %v", ipNet.IP))
+				continue
+			}
+			ones, _ := ipNet.Mask.Size()
+			prefix := netip.PrefixFrom(addr.Unmap(), ones).Masked()
+			ip := prefix.Addr()
+
+			// TODO: add IPv6
+			if !ip.Is4() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				continue
+			}
+
+			prefixes = append(prefixes, prefix)
+		}
+	}
+
+	return prefixes, nberrors.FormatErrorOrNil(merr)
 }

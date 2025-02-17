@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +13,10 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/util/embeddedroots"
 )
 
 // HostedGrantType grant type for device flow on Hosted
@@ -54,6 +60,18 @@ type TokenRequestResponse struct {
 func NewDeviceAuthorizationFlow(config internal.DeviceAuthProviderConfig) (*DeviceAuthorizationFlow, error) {
 	httpTransport := http.DefaultTransport.(*http.Transport).Clone()
 	httpTransport.MaxIdleConns = 5
+
+	certPool, err := x509.SystemCertPool()
+	if err != nil || certPool == nil {
+		log.Debugf("System cert pool not available; falling back to embedded cert, error: %v", err)
+		certPool = embeddedroots.Get()
+	} else {
+		log.Debug("Using system certificate pool.")
+	}
+
+	httpTransport.TLSClientConfig = &tls.Config{
+		RootCAs: certPool,
+	}
 
 	httpClient := &http.Client{
 		Timeout:   10 * time.Second,
@@ -180,7 +198,7 @@ func (d *DeviceAuthorizationFlow) WaitToken(ctx context.Context, info AuthFlowIn
 					continue
 				}
 
-				return TokenInfo{}, fmt.Errorf(tokenResponse.ErrorDescription)
+				return TokenInfo{}, errors.New(tokenResponse.ErrorDescription)
 			}
 
 			tokenInfo := TokenInfo{

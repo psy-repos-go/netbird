@@ -11,7 +11,7 @@ import (
 func Test_LocalWTVersion(t *testing.T) {
 	got := GetInfo(context.TODO())
 	want := "development"
-	assert.Equal(t, want, got.WiretrusteeVersion)
+	assert.Equal(t, want, got.NetbirdVersion)
 }
 
 func Test_UIVersion(t *testing.T) {
@@ -32,4 +32,14 @@ func Test_CustomHostname(t *testing.T) {
 
 	got := GetInfo(ctx)
 	assert.Equal(t, want, got.Hostname)
+}
+
+func Test_NetAddresses(t *testing.T) {
+	addr, err := networkAddresses()
+	if err != nil {
+		t.Errorf("failed to discover network addresses: %s", err)
+	}
+	if len(addr) == 0 {
+		t.Errorf("no network addresses found")
+	}
 }

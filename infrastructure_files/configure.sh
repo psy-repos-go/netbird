@@ -41,6 +41,30 @@ if [[ "x-$NETBIRD_DOMAIN" == "x-" ]]; then
   exit 1
 fi
 
+# Check if PostgreSQL is set as the store engine
+if [[ "$NETBIRD_STORE_CONFIG_ENGINE" == "postgres" ]]; then
+  # Exit if 'NETBIRD_STORE_ENGINE_POSTGRES_DSN' is not set
+  if [[ -z "$NETBIRD_STORE_ENGINE_POSTGRES_DSN" ]]; then
+    echo "Warning: NETBIRD_STORE_CONFIG_ENGINE=postgres but NETBIRD_STORE_ENGINE_POSTGRES_DSN is not set."
+    echo "Please add the following line to your setup.env file:"
+    echo 'NETBIRD_STORE_ENGINE_POSTGRES_DSN="host=<PG_HOST> user=<PG_USER> password=<PG_PASSWORD> dbname=<PG_DB_NAME> port=<PG_PORT>"'
+    exit 1
+  fi
+  export NETBIRD_STORE_ENGINE_POSTGRES_DSN
+fi
+
+# Check if MySQL is set as the store engine
+if [[ "$NETBIRD_STORE_CONFIG_ENGINE" == "mysql" ]]; then
+  # Exit if 'NETBIRD_STORE_ENGINE_MYSQL_DSN' is not set
+  if [[ -z "$NETBIRD_STORE_ENGINE_MYSQL_DSN" ]]; then
+    echo "Warning: NETBIRD_STORE_CONFIG_ENGINE=mysql but NETBIRD_STORE_ENGINE_MYSQL_DSN is not set."
+    echo "Please add the following line to your setup.env file:"
+    echo 'NETBIRD_STORE_ENGINE_MYSQL_DSN="<username>:<password>@tcp(127.0.0.1:3306)/<database>"'
+    exit 1
+  fi
+  export NETBIRD_STORE_ENGINE_MYSQL_DSN
+fi
+
 # local development or tests
 if [[ $NETBIRD_DOMAIN == "localhost" || $NETBIRD_DOMAIN == "127.0.0.1" ]]; then
   export NETBIRD_MGMT_SINGLE_ACCOUNT_MODE_DOMAIN="netbird.selfhosted"
@@ -53,6 +77,37 @@ fi
 if [[ "x-$TURN_PASSWORD" == "x-" ]]; then
   export TURN_PASSWORD=$(openssl rand -base64 32 | sed 's/=//g')
 fi
+
+TURN_EXTERNAL_IP_CONFIG="#"
+
+if [[ "x-$NETBIRD_TURN_EXTERNAL_IP" == "x-" ]]; then
+  echo "discovering server's public IP"
+  IP=$(curl -s -4 https://jsonip.com | jq -r '.ip')
+  if [[ "x-$IP" != "x-" ]]; then
+    TURN_EXTERNAL_IP_CONFIG="external-ip=$IP"
+  else
+    echo "unable to discover server's public IP"
+  fi
+else
+  echo "${NETBIRD_TURN_EXTERNAL_IP}"| egrep '([0-9]{1,3}\.){3}[0-9]{1,3}$' > /dev/null
+  if [[ $? -eq 0 ]]; then
+    echo "using provided server's public IP"
+    TURN_EXTERNAL_IP_CONFIG="external-ip=$NETBIRD_TURN_EXTERNAL_IP"
+  else
+    echo "provided NETBIRD_TURN_EXTERNAL_IP $NETBIRD_TURN_EXTERNAL_IP is invalid, please correct it and try again"
+    exit 1
+  fi
+fi
+
+export TURN_EXTERNAL_IP_CONFIG
+
+# if not provided, we generate a relay auth secret
+if [[ "x-$NETBIRD_RELAY_AUTH_SECRET" == "x-" ]]; then
+  export NETBIRD_RELAY_AUTH_SECRET=$(openssl rand -base64 32 | sed 's/=//g')
+fi
+
+artifacts_path="./artifacts"
+mkdir -p $artifacts_path
 
 MGMT_VOLUMENAME="${VOLUME_PREFIX}${MGMT_VOLUMESUFFIX}"
 SIGNAL_VOLUMENAME="${VOLUME_PREFIX}${SIGNAL_VOLUMESUFFIX}"
@@ -94,13 +149,13 @@ if [[ -z "${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT}" ]]; then
 fi
 
 echo "loading OpenID configuration from ${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT} to the openid-configuration.json file"
-curl "${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT}" -q -o openid-configuration.json
+curl "${NETBIRD_AUTH_OIDC_CONFIGURATION_ENDPOINT}" -q -o ${artifacts_path}/openid-configuration.json
 
-export NETBIRD_AUTH_AUTHORITY=$(jq -r '.issuer' openid-configuration.json)
-export NETBIRD_AUTH_JWT_CERTS=$(jq -r '.jwks_uri' openid-configuration.json)
-export NETBIRD_AUTH_TOKEN_ENDPOINT=$(jq -r '.token_endpoint' openid-configuration.json)
-export NETBIRD_AUTH_DEVICE_AUTH_ENDPOINT=$(jq -r '.device_authorization_endpoint' openid-configuration.json)
-export NETBIRD_AUTH_PKCE_AUTHORIZATION_ENDPOINT=$(jq -r '.authorization_endpoint' openid-configuration.json)
+export NETBIRD_AUTH_AUTHORITY=$(jq -r '.issuer' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_JWT_CERTS=$(jq -r '.jwks_uri' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_TOKEN_ENDPOINT=$(jq -r '.token_endpoint' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_DEVICE_AUTH_ENDPOINT=$(jq -r '.device_authorization_endpoint' ${artifacts_path}/openid-configuration.json)
+export NETBIRD_AUTH_PKCE_AUTHORIZATION_ENDPOINT=$(jq -r '.authorization_endpoint' ${artifacts_path}/openid-configuration.json)
 
 if [[ ! -z "${NETBIRD_AUTH_DEVICE_AUTH_CLIENT_ID}" ]]; then
   # user enabled Device Authorization Grant feature
@@ -185,17 +240,17 @@ fi
 env | grep NETBIRD
 
 bkp_postfix="$(date +%s)"
-if test -f 'docker-compose.yml'; then
-    cp docker-compose.yml "docker-compose.yml.bkp.${bkp_postfix}"
+if test -f "${artifacts_path}/docker-compose.yml"; then
+    cp $artifacts_path/docker-compose.yml "${artifacts_path}/docker-compose.yml.bkp.${bkp_postfix}"
 fi
 
-if test -f 'management.json'; then
-    cp management.json "management.json.bkp.${bkp_postfix}"
+if test -f "${artifacts_path}/management.json"; then
+    cp $artifacts_path/management.json "${artifacts_path}/management.json.bkp.${bkp_postfix}"
 fi
 
-if test -f 'turnserver.conf'; then
-    cp turnserver.conf "turnserver.conf.bpk.${bkp_postfix}"
+if test -f "${artifacts_path}/turnserver.conf"; then
+    cp ${artifacts_path}/turnserver.conf "${artifacts_path}/turnserver.conf.bkp.${bkp_postfix}"
 fi
-envsubst <docker-compose.yml.tmpl >docker-compose.yml
-envsubst <management.json.tmpl | jq . >management.json
-envsubst <turnserver.conf.tmpl >turnserver.conf
+envsubst <docker-compose.yml.tmpl >$artifacts_path/docker-compose.yml
+envsubst <management.json.tmpl | jq . >$artifacts_path/management.json
+envsubst <turnserver.conf.tmpl >$artifacts_path/turnserver.conf

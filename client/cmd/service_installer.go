@@ -31,6 +31,8 @@ var installCmd = &cobra.Command{
 			configPath,
 			"--log-level",
 			logLevel,
+			"--daemon-addr",
+			daemonAddr,
 		}
 
 		if managementURL != "" {
@@ -64,6 +66,10 @@ var installCmd = &cobra.Command{
 			}
 		}
 
+		if runtime.GOOS == "windows" {
+			svcConfig.Option["OnFailure"] = "restart"
+		}
+
 		ctx, cancel := context.WithCancel(cmd.Context())
 
 		s, err := newSVC(newProgram(ctx, cancel), svcConfig)
@@ -77,6 +83,7 @@ var installCmd = &cobra.Command{
 			cmd.PrintErrln(err)
 			return err
 		}
+
 		cmd.Println("Netbird service has been installed")
 		return nil
 	},
@@ -106,7 +113,7 @@ var uninstallCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		cmd.Println("Netbird has been uninstalled")
+		cmd.Println("Netbird service has been uninstalled")
 		return nil
 	},
 }

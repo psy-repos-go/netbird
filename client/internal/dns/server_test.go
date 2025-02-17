@@ -11,18 +11,26 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/netbirdio/netbird/client/firewall/uspfilter"
+	"github.com/netbirdio/netbird/client/iface"
+	"github.com/netbirdio/netbird/client/iface/configurer"
+	"github.com/netbirdio/netbird/client/iface/device"
+	pfmock "github.com/netbirdio/netbird/client/iface/mocks"
+	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/statemanager"
 	"github.com/netbirdio/netbird/client/internal/stdnet"
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/formatter"
-	"github.com/netbirdio/netbird/iface"
-	pfmock "github.com/netbirdio/netbird/iface/mocks"
 )
 
 type mocWGIface struct {
-	filter iface.PacketFilter
+	filter device.PacketFilter
 }
 
 func (w *mocWGIface) Name() string {
@@ -37,11 +45,15 @@ func (w *mocWGIface) Address() iface.WGAddress {
 	}
 }
 
-func (w *mocWGIface) GetFilter() iface.PacketFilter {
+func (w *mocWGIface) ToInterface() *net.Interface {
+	panic("implement me")
+}
+
+func (w *mocWGIface) GetFilter() device.PacketFilter {
 	return w.filter
 }
 
-func (w *mocWGIface) GetDevice() *iface.DeviceWrapper {
+func (w *mocWGIface) GetDevice() *device.FilteredDevice {
 	panic("implement me")
 }
 
@@ -53,9 +65,13 @@ func (w *mocWGIface) IsUserspaceBind() bool {
 	return false
 }
 
-func (w *mocWGIface) SetFilter(filter iface.PacketFilter) error {
+func (w *mocWGIface) SetFilter(filter device.PacketFilter) error {
 	w.filter = filter
 	return nil
+}
+
+func (w *mocWGIface) GetStats(_ string) (configurer.WGStats, error) {
+	return configurer.WGStats{}, nil
 }
 
 var zoneRecords = []nbdns.SimpleRecord{
@@ -71,6 +87,18 @@ var zoneRecords = []nbdns.SimpleRecord{
 func init() {
 	log.SetLevel(log.TraceLevel)
 	formatter.SetTextFormatter(log.StandardLogger())
+}
+
+func generateDummyHandler(domain string, servers []nbdns.NameServer) *upstreamResolverBase {
+	var srvs []string
+	for _, srv := range servers {
+		srvs = append(srvs, getNSHostPort(srv))
+	}
+	return &upstreamResolverBase{
+		domain:          domain,
+		upstreamServers: srvs,
+		cancel:          func() {},
+	}
 }
 
 func TestUpdateDNSServer(t *testing.T) {
@@ -125,15 +153,37 @@ func TestUpdateDNSServer(t *testing.T) {
 					},
 				},
 			},
-			expectedUpstreamMap: registeredHandlerMap{"netbird.io": dummyHandler, "netbird.cloud": dummyHandler, nbdns.RootZone: dummyHandler},
-			expectedLocalMap:    registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
+			expectedUpstreamMap: registeredHandlerMap{
+				generateDummyHandler("netbird.io", nameServers).id(): handlerWrapper{
+					domain:   "netbird.io",
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+				dummyHandler.id(): handlerWrapper{
+					domain:   "netbird.cloud",
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+				generateDummyHandler(".", nameServers).id(): handlerWrapper{
+					domain:   nbdns.RootZone,
+					handler:  dummyHandler,
+					priority: PriorityDefault,
+				},
+			},
+			expectedLocalMap: registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
 		},
 		{
-			name:            "New Config Should Succeed",
-			initLocalMap:    registrationMap{"netbird.cloud": struct{}{}},
-			initUpstreamMap: registeredHandlerMap{buildRecordKey(zoneRecords[0].Name, 1, 1): dummyHandler},
-			initSerial:      0,
-			inputSerial:     1,
+			name:         "New Config Should Succeed",
+			initLocalMap: registrationMap{"netbird.cloud": struct{}{}},
+			initUpstreamMap: registeredHandlerMap{
+				generateDummyHandler(zoneRecords[0].Name, nameServers).id(): handlerWrapper{
+					domain:   buildRecordKey(zoneRecords[0].Name, 1, 1),
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+			},
+			initSerial:  0,
+			inputSerial: 1,
 			inputUpdate: nbdns.Config{
 				ServiceEnable: true,
 				CustomZones: []nbdns.CustomZone{
@@ -149,8 +199,19 @@ func TestUpdateDNSServer(t *testing.T) {
 					},
 				},
 			},
-			expectedUpstreamMap: registeredHandlerMap{"netbird.io": dummyHandler, "netbird.cloud": dummyHandler},
-			expectedLocalMap:    registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
+			expectedUpstreamMap: registeredHandlerMap{
+				generateDummyHandler("netbird.io", nameServers).id(): handlerWrapper{
+					domain:   "netbird.io",
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+				"local-resolver": handlerWrapper{
+					domain:   "netbird.cloud",
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+			},
+			expectedLocalMap: registrationMap{buildRecordKey(zoneRecords[0].Name, 1, 1): struct{}{}},
 		},
 		{
 			name:            "Smaller Config Serial Should Be Skipped",
@@ -227,9 +288,15 @@ func TestUpdateDNSServer(t *testing.T) {
 			shouldFail: true,
 		},
 		{
-			name:                "Empty Config Should Succeed and Clean Maps",
-			initLocalMap:        registrationMap{"netbird.cloud": struct{}{}},
-			initUpstreamMap:     registeredHandlerMap{zoneRecords[0].Name: dummyHandler},
+			name:         "Empty Config Should Succeed and Clean Maps",
+			initLocalMap: registrationMap{"netbird.cloud": struct{}{}},
+			initUpstreamMap: registeredHandlerMap{
+				generateDummyHandler(zoneRecords[0].Name, nameServers).id(): handlerWrapper{
+					domain:   zoneRecords[0].Name,
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+			},
 			initSerial:          0,
 			inputSerial:         1,
 			inputUpdate:         nbdns.Config{ServiceEnable: true},
@@ -237,9 +304,15 @@ func TestUpdateDNSServer(t *testing.T) {
 			expectedLocalMap:    make(registrationMap),
 		},
 		{
-			name:                "Disabled Service Should clean map",
-			initLocalMap:        registrationMap{"netbird.cloud": struct{}{}},
-			initUpstreamMap:     registeredHandlerMap{zoneRecords[0].Name: dummyHandler},
+			name:         "Disabled Service Should clean map",
+			initLocalMap: registrationMap{"netbird.cloud": struct{}{}},
+			initUpstreamMap: registeredHandlerMap{
+				generateDummyHandler(zoneRecords[0].Name, nameServers).id(): handlerWrapper{
+					domain:   zoneRecords[0].Name,
+					handler:  dummyHandler,
+					priority: PriorityMatchDomain,
+				},
+			},
 			initSerial:          0,
 			inputSerial:         1,
 			inputUpdate:         nbdns.Config{ServiceEnable: false},
@@ -250,11 +323,22 @@ func TestUpdateDNSServer(t *testing.T) {
 
 	for n, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			privKey, _ := wgtypes.GenerateKey()
 			newNet, err := stdnet.NewNet(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			wgIface, err := iface.NewWGIFace(fmt.Sprintf("utun230%d", n), fmt.Sprintf("100.66.100.%d/32", n+1), iface.DefaultMTU, nil, newNet)
+
+			opts := iface.WGIFaceOpts{
+				IFaceName:    fmt.Sprintf("utun230%d", n),
+				Address:      fmt.Sprintf("100.66.100.%d/32", n+1),
+				WGPort:       33100,
+				WGPrivKey:    privKey.String(),
+				MTU:          iface.DefaultMTU,
+				TransportNet: newNet,
+			}
+
+			wgIface, err := iface.NewWGIFace(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -268,7 +352,7 @@ func TestUpdateDNSServer(t *testing.T) {
 					t.Log(err)
 				}
 			}()
-			dnsServer, err := NewDefaultServer(context.Background(), wgIface, "")
+			dnsServer, err := NewDefaultServer(context.Background(), wgIface, "", &peer.Status{}, nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -331,7 +415,16 @@ func TestDNSFakeResolverHandleUpdates(t *testing.T) {
 		return
 	}
 
-	wgIface, err := iface.NewWGIFace("utun2301", "100.66.100.1/32", iface.DefaultMTU, nil, newNet)
+	privKey, _ := wgtypes.GeneratePrivateKey()
+	opts := iface.WGIFaceOpts{
+		IFaceName:    "utun2301",
+		Address:      "100.66.100.1/32",
+		WGPort:       33100,
+		WGPrivKey:    privKey.String(),
+		MTU:          iface.DefaultMTU,
+		TransportNet: newNet,
+	}
+	wgIface, err := iface.NewWGIFace(opts)
 	if err != nil {
 		t.Errorf("build interface wireguard: %v", err)
 		return
@@ -368,7 +461,7 @@ func TestDNSFakeResolverHandleUpdates(t *testing.T) {
 		return
 	}
 
-	dnsServer, err := NewDefaultServer(context.Background(), wgIface, "")
+	dnsServer, err := NewDefaultServer(context.Background(), wgIface, "", &peer.Status{}, nil, false)
 	if err != nil {
 		t.Errorf("create DNS server: %v", err)
 		return
@@ -386,7 +479,13 @@ func TestDNSFakeResolverHandleUpdates(t *testing.T) {
 		}
 	}()
 
-	dnsServer.dnsMuxMap = registeredHandlerMap{zoneRecords[0].Name: &localResolver{}}
+	dnsServer.dnsMuxMap = registeredHandlerMap{
+		"id1": handlerWrapper{
+			domain:   zoneRecords[0].Name,
+			handler:  &localResolver{},
+			priority: PriorityMatchDomain,
+		},
+	}
 	dnsServer.localResolver.registeredMap = registrationMap{"netbird.cloud": struct{}{}}
 	dnsServer.updateSerial = 0
 
@@ -463,7 +562,7 @@ func TestDNSServerStartStop(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			dnsServer, err := NewDefaultServer(context.Background(), &mocWGIface{}, testCase.addrPort)
+			dnsServer, err := NewDefaultServer(context.Background(), &mocWGIface{}, testCase.addrPort, &peer.Status{}, nil, false)
 			if err != nil {
 				t.Fatalf("%v", err)
 			}
@@ -479,7 +578,7 @@ func TestDNSServerStartStop(t *testing.T) {
 				t.Error(err)
 			}
 
-			dnsServer.service.RegisterMux("netbird.cloud", dnsServer.localResolver)
+			dnsServer.registerHandler([]string{"netbird.cloud"}, dnsServer.localResolver, 1)
 
 			resolver := &net.Resolver{
 				PreferGo: true,
@@ -522,28 +621,31 @@ func TestDNSServerStartStop(t *testing.T) {
 func TestDNSServerUpstreamDeactivateCallback(t *testing.T) {
 	hostManager := &mockHostConfigurator{}
 	server := DefaultServer{
-		service: newServiceViaMemory(&mocWGIface{}),
+		ctx:     context.Background(),
+		service: NewServiceViaMemory(&mocWGIface{}),
 		localResolver: &localResolver{
 			registeredMap: make(registrationMap),
 		},
-		hostManager: hostManager,
-		currentConfig: hostDNSConfig{
-			domains: []domainConfig{
+		handlerChain: NewHandlerChain(),
+		hostManager:  hostManager,
+		currentConfig: HostDNSConfig{
+			Domains: []DomainConfig{
 				{false, "domain0", false},
 				{false, "domain1", false},
 				{false, "domain2", false},
 			},
 		},
+		statusRecorder: &peer.Status{},
 	}
 
 	var domainsUpdate string
-	hostManager.applyDNSConfigFunc = func(config hostDNSConfig) error {
+	hostManager.applyDNSConfigFunc = func(config HostDNSConfig, statemanager *statemanager.Manager) error {
 		domains := []string{}
-		for _, item := range config.domains {
-			if item.disabled {
+		for _, item := range config.Domains {
+			if item.Disabled {
 				continue
 			}
-			domains = append(domains, item.domain)
+			domains = append(domains, item.Domain)
 		}
 		domainsUpdate = strings.Join(domains, ",")
 		return nil
@@ -554,16 +656,16 @@ func TestDNSServerUpstreamDeactivateCallback(t *testing.T) {
 		NameServers: []nbdns.NameServer{
 			{IP: netip.MustParseAddr("8.8.0.0"), NSType: nbdns.UDPNameServerType, Port: 53},
 		},
-	}, nil)
+	}, nil, 0)
 
-	deactivate()
+	deactivate(nil)
 	expected := "domain0,domain2"
 	domains := []string{}
-	for _, item := range server.currentConfig.domains {
-		if item.disabled {
+	for _, item := range server.currentConfig.Domains {
+		if item.Disabled {
 			continue
 		}
-		domains = append(domains, item.domain)
+		domains = append(domains, item.Domain)
 	}
 	got := strings.Join(domains, ",")
 	if expected != got {
@@ -573,11 +675,11 @@ func TestDNSServerUpstreamDeactivateCallback(t *testing.T) {
 	reactivate()
 	expected = "domain0,domain1,domain2"
 	domains = []string{}
-	for _, item := range server.currentConfig.domains {
-		if item.disabled {
+	for _, item := range server.currentConfig.Domains {
+		if item.Disabled {
 			continue
 		}
-		domains = append(domains, item.domain)
+		domains = append(domains, item.Domain)
 	}
 	got = strings.Join(domains, ",")
 	if expected != got {
@@ -594,7 +696,7 @@ func TestDNSPermanent_updateHostDNS_emptyUpstream(t *testing.T) {
 
 	var dnsList []string
 	dnsConfig := nbdns.Config{}
-	dnsServer := NewDefaultServerPermanentUpstream(context.Background(), wgIFace, dnsList, dnsConfig, nil)
+	dnsServer := NewDefaultServerPermanentUpstream(context.Background(), wgIFace, dnsList, dnsConfig, nil, &peer.Status{}, false)
 	err = dnsServer.Initialize()
 	if err != nil {
 		t.Errorf("failed to initialize DNS server: %v", err)
@@ -618,7 +720,7 @@ func TestDNSPermanent_updateUpstream(t *testing.T) {
 	}
 	defer wgIFace.Close()
 	dnsConfig := nbdns.Config{}
-	dnsServer := NewDefaultServerPermanentUpstream(context.Background(), wgIFace, []string{"8.8.8.8"}, dnsConfig, nil)
+	dnsServer := NewDefaultServerPermanentUpstream(context.Background(), wgIFace, []string{"8.8.8.8"}, dnsConfig, nil, &peer.Status{}, false)
 	err = dnsServer.Initialize()
 	if err != nil {
 		t.Errorf("failed to initialize DNS server: %v", err)
@@ -710,7 +812,7 @@ func TestDNSPermanent_matchOnly(t *testing.T) {
 	}
 	defer wgIFace.Close()
 	dnsConfig := nbdns.Config{}
-	dnsServer := NewDefaultServerPermanentUpstream(context.Background(), wgIFace, []string{"8.8.8.8"}, dnsConfig, nil)
+	dnsServer := NewDefaultServerPermanentUpstream(context.Background(), wgIFace, []string{"8.8.8.8"}, dnsConfig, nil, &peer.Status{}, false)
 	err = dnsServer.Initialize()
 	if err != nil {
 		t.Errorf("failed to initialize DNS server: %v", err)
@@ -741,8 +843,13 @@ func TestDNSPermanent_matchOnly(t *testing.T) {
 						NSType: nbdns.UDPNameServerType,
 						Port:   53,
 					},
+					{
+						IP:     netip.MustParseAddr("9.9.9.9"),
+						NSType: nbdns.UDPNameServerType,
+						Port:   53,
+					},
 				},
-				Domains: []string{"customdomain.com"},
+				Domains: []string{"google.com"},
 				Primary: false,
 			},
 		},
@@ -764,7 +871,7 @@ func TestDNSPermanent_matchOnly(t *testing.T) {
 	if ips[0] != zoneRecords[0].RData {
 		t.Fatalf("invalid zone record: %v", err)
 	}
-	_, err = resolver.LookupHost(context.Background(), "customdomain.com")
+	_, err = resolver.LookupHost(context.Background(), "google.com")
 	if err != nil {
 		t.Errorf("failed to resolve: %s", err)
 	}
@@ -782,7 +889,18 @@ func createWgInterfaceWithBind(t *testing.T) (*iface.WGIface, error) {
 		return nil, err
 	}
 
-	wgIface, err := iface.NewWGIFace("utun2301", "100.66.100.2/24", iface.DefaultMTU, nil, newNet)
+	privKey, _ := wgtypes.GeneratePrivateKey()
+
+	opts := iface.WGIFaceOpts{
+		IFaceName:    "utun2301",
+		Address:      "100.66.100.2/24",
+		WGPort:       33100,
+		WGPrivKey:    privKey.String(),
+		MTU:          iface.DefaultMTU,
+		TransportNet: newNet,
+	}
+
+	wgIface, err := iface.NewWGIFace(opts)
 	if err != nil {
 		t.Fatalf("build interface wireguard: %v", err)
 		return nil, err
@@ -794,7 +912,7 @@ func createWgInterfaceWithBind(t *testing.T) (*iface.WGIface, error) {
 		return nil, err
 	}
 
-	pf, err := uspfilter.Create(wgIface)
+	pf, err := uspfilter.Create(wgIface, false)
 	if err != nil {
 		t.Fatalf("failed to create uspfilter: %v", err)
 		return nil, err
@@ -819,5 +937,506 @@ func newDnsResolver(ip string, port int) *net.Resolver {
 			addr := fmt.Sprintf("%s:%d", ip, port)
 			return d.DialContext(ctx, network, addr)
 		},
+	}
+}
+
+// MockHandler implements dns.Handler interface for testing
+type MockHandler struct {
+	mock.Mock
+}
+
+func (m *MockHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	m.Called(w, r)
+}
+
+type MockSubdomainHandler struct {
+	MockHandler
+	Subdomains bool
+}
+
+func (m *MockSubdomainHandler) MatchSubdomains() bool {
+	return m.Subdomains
+}
+
+func TestHandlerChain_DomainPriorities(t *testing.T) {
+	chain := NewHandlerChain()
+
+	dnsRouteHandler := &MockHandler{}
+	upstreamHandler := &MockSubdomainHandler{
+		Subdomains: true,
+	}
+
+	chain.AddHandler("example.com.", dnsRouteHandler, PriorityDNSRoute)
+	chain.AddHandler("example.com.", upstreamHandler, PriorityMatchDomain)
+
+	testCases := []struct {
+		name            string
+		query           string
+		expectedHandler dns.Handler
+	}{
+		{
+			name:            "exact domain with dns route handler",
+			query:           "example.com.",
+			expectedHandler: dnsRouteHandler,
+		},
+		{
+			name:            "subdomain should use upstream handler",
+			query:           "sub.example.com.",
+			expectedHandler: upstreamHandler,
+		},
+		{
+			name:            "deep subdomain should use upstream handler",
+			query:           "deep.sub.example.com.",
+			expectedHandler: upstreamHandler,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := new(dns.Msg)
+			r.SetQuestion(tc.query, dns.TypeA)
+			w := &ResponseWriterChain{ResponseWriter: &mockResponseWriter{}}
+
+			if mh, ok := tc.expectedHandler.(*MockHandler); ok {
+				mh.On("ServeDNS", mock.Anything, r).Once()
+			} else if mh, ok := tc.expectedHandler.(*MockSubdomainHandler); ok {
+				mh.On("ServeDNS", mock.Anything, r).Once()
+			}
+
+			chain.ServeDNS(w, r)
+
+			if mh, ok := tc.expectedHandler.(*MockHandler); ok {
+				mh.AssertExpectations(t)
+			} else if mh, ok := tc.expectedHandler.(*MockSubdomainHandler); ok {
+				mh.AssertExpectations(t)
+			}
+
+			// Reset mocks
+			if mh, ok := tc.expectedHandler.(*MockHandler); ok {
+				mh.ExpectedCalls = nil
+				mh.Calls = nil
+			} else if mh, ok := tc.expectedHandler.(*MockSubdomainHandler); ok {
+				mh.ExpectedCalls = nil
+				mh.Calls = nil
+			}
+		})
+	}
+}
+
+type mockHandler struct {
+	Id string
+}
+
+func (m *mockHandler) ServeDNS(dns.ResponseWriter, *dns.Msg) {}
+func (m *mockHandler) stop()                                 {}
+func (m *mockHandler) probeAvailability()                    {}
+func (m *mockHandler) id() handlerID                         { return handlerID(m.Id) }
+
+type mockService struct{}
+
+func (m *mockService) Listen() error                   { return nil }
+func (m *mockService) Stop()                           {}
+func (m *mockService) RuntimeIP() string               { return "127.0.0.1" }
+func (m *mockService) RuntimePort() int                { return 53 }
+func (m *mockService) RegisterMux(string, dns.Handler) {}
+func (m *mockService) DeregisterMux(string)            {}
+
+func TestDefaultServer_UpdateMux(t *testing.T) {
+	baseMatchHandlers := registeredHandlerMap{
+		"upstream-group1": {
+			domain: "example.com",
+			handler: &mockHandler{
+				Id: "upstream-group1",
+			},
+			priority: PriorityMatchDomain,
+		},
+		"upstream-group2": {
+			domain: "example.com",
+			handler: &mockHandler{
+				Id: "upstream-group2",
+			},
+			priority: PriorityMatchDomain - 1,
+		},
+	}
+
+	baseRootHandlers := registeredHandlerMap{
+		"upstream-root1": {
+			domain: ".",
+			handler: &mockHandler{
+				Id: "upstream-root1",
+			},
+			priority: PriorityDefault,
+		},
+		"upstream-root2": {
+			domain: ".",
+			handler: &mockHandler{
+				Id: "upstream-root2",
+			},
+			priority: PriorityDefault - 1,
+		},
+	}
+
+	baseMixedHandlers := registeredHandlerMap{
+		"upstream-group1": {
+			domain: "example.com",
+			handler: &mockHandler{
+				Id: "upstream-group1",
+			},
+			priority: PriorityMatchDomain,
+		},
+		"upstream-group2": {
+			domain: "example.com",
+			handler: &mockHandler{
+				Id: "upstream-group2",
+			},
+			priority: PriorityMatchDomain - 1,
+		},
+		"upstream-other": {
+			domain: "other.com",
+			handler: &mockHandler{
+				Id: "upstream-other",
+			},
+			priority: PriorityMatchDomain,
+		},
+	}
+
+	tests := []struct {
+		name             string
+		initialHandlers  registeredHandlerMap
+		updates          []handlerWrapper
+		expectedHandlers map[string]string // map[handlerID]domain
+		description      string
+	}{
+		{
+			name:            "Remove group1 from update",
+			initialHandlers: baseMatchHandlers,
+			updates: []handlerWrapper{
+				// Only group2 remains
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group2",
+					},
+					priority: PriorityMatchDomain - 1,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-group2": "example.com",
+			},
+			description: "When group1 is not included in the update, it should be removed while group2 remains",
+		},
+		{
+			name:            "Remove group2 from update",
+			initialHandlers: baseMatchHandlers,
+			updates: []handlerWrapper{
+				// Only group1 remains
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group1",
+					},
+					priority: PriorityMatchDomain,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-group1": "example.com",
+			},
+			description: "When group2 is not included in the update, it should be removed while group1 remains",
+		},
+		{
+			name:            "Add group3 in first position",
+			initialHandlers: baseMatchHandlers,
+			updates: []handlerWrapper{
+				// Add group3 with highest priority
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group3",
+					},
+					priority: PriorityMatchDomain + 1,
+				},
+				// Keep existing groups with their original priorities
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group1",
+					},
+					priority: PriorityMatchDomain,
+				},
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group2",
+					},
+					priority: PriorityMatchDomain - 1,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-group1": "example.com",
+				"upstream-group2": "example.com",
+				"upstream-group3": "example.com",
+			},
+			description: "When adding group3 with highest priority, it should be first in chain while maintaining existing groups",
+		},
+		{
+			name:            "Add group3 in last position",
+			initialHandlers: baseMatchHandlers,
+			updates: []handlerWrapper{
+				// Keep existing groups with their original priorities
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group1",
+					},
+					priority: PriorityMatchDomain,
+				},
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group2",
+					},
+					priority: PriorityMatchDomain - 1,
+				},
+				// Add group3 with lowest priority
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group3",
+					},
+					priority: PriorityMatchDomain - 2,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-group1": "example.com",
+				"upstream-group2": "example.com",
+				"upstream-group3": "example.com",
+			},
+			description: "When adding group3 with lowest priority, it should be last in chain while maintaining existing groups",
+		},
+		// Root zone tests
+		{
+			name:            "Remove root1 from update",
+			initialHandlers: baseRootHandlers,
+			updates: []handlerWrapper{
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root2",
+					},
+					priority: PriorityDefault - 1,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-root2": ".",
+			},
+			description: "When root1 is not included in the update, it should be removed while root2 remains",
+		},
+		{
+			name:            "Remove root2 from update",
+			initialHandlers: baseRootHandlers,
+			updates: []handlerWrapper{
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root1",
+					},
+					priority: PriorityDefault,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-root1": ".",
+			},
+			description: "When root2 is not included in the update, it should be removed while root1 remains",
+		},
+		{
+			name:            "Add root3 in first position",
+			initialHandlers: baseRootHandlers,
+			updates: []handlerWrapper{
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root3",
+					},
+					priority: PriorityDefault + 1,
+				},
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root1",
+					},
+					priority: PriorityDefault,
+				},
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root2",
+					},
+					priority: PriorityDefault - 1,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-root1": ".",
+				"upstream-root2": ".",
+				"upstream-root3": ".",
+			},
+			description: "When adding root3 with highest priority, it should be first in chain while maintaining existing root handlers",
+		},
+		{
+			name:            "Add root3 in last position",
+			initialHandlers: baseRootHandlers,
+			updates: []handlerWrapper{
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root1",
+					},
+					priority: PriorityDefault,
+				},
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root2",
+					},
+					priority: PriorityDefault - 1,
+				},
+				{
+					domain: ".",
+					handler: &mockHandler{
+						Id: "upstream-root3",
+					},
+					priority: PriorityDefault - 2,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-root1": ".",
+				"upstream-root2": ".",
+				"upstream-root3": ".",
+			},
+			description: "When adding root3 with lowest priority, it should be last in chain while maintaining existing root handlers",
+		},
+		// Mixed domain tests
+		{
+			name:            "Update with mixed domains - remove one of duplicate domain",
+			initialHandlers: baseMixedHandlers,
+			updates: []handlerWrapper{
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group1",
+					},
+					priority: PriorityMatchDomain,
+				},
+				{
+					domain: "other.com",
+					handler: &mockHandler{
+						Id: "upstream-other",
+					},
+					priority: PriorityMatchDomain,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-group1": "example.com",
+				"upstream-other":  "other.com",
+			},
+			description: "When updating mixed domains, should correctly handle removal of one duplicate while maintaining other domains",
+		},
+		{
+			name:            "Update with mixed domains - add new domain",
+			initialHandlers: baseMixedHandlers,
+			updates: []handlerWrapper{
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group1",
+					},
+					priority: PriorityMatchDomain,
+				},
+				{
+					domain: "example.com",
+					handler: &mockHandler{
+						Id: "upstream-group2",
+					},
+					priority: PriorityMatchDomain - 1,
+				},
+				{
+					domain: "other.com",
+					handler: &mockHandler{
+						Id: "upstream-other",
+					},
+					priority: PriorityMatchDomain,
+				},
+				{
+					domain: "new.com",
+					handler: &mockHandler{
+						Id: "upstream-new",
+					},
+					priority: PriorityMatchDomain,
+				},
+			},
+			expectedHandlers: map[string]string{
+				"upstream-group1": "example.com",
+				"upstream-group2": "example.com",
+				"upstream-other":  "other.com",
+				"upstream-new":    "new.com",
+			},
+			description: "When updating mixed domains, should maintain existing duplicates and add new domain",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &DefaultServer{
+				dnsMuxMap:    tt.initialHandlers,
+				handlerChain: NewHandlerChain(),
+				service:      &mockService{},
+			}
+
+			// Perform the update
+			server.updateMux(tt.updates)
+
+			// Verify the results
+			assert.Equal(t, len(tt.expectedHandlers), len(server.dnsMuxMap),
+				"Number of handlers after update doesn't match expected")
+
+			// Check each expected handler
+			for id, expectedDomain := range tt.expectedHandlers {
+				handler, exists := server.dnsMuxMap[handlerID(id)]
+				assert.True(t, exists, "Expected handler %s not found", id)
+				if exists {
+					assert.Equal(t, expectedDomain, handler.domain,
+						"Domain mismatch for handler %s", id)
+				}
+			}
+
+			// Verify no unexpected handlers exist
+			for handlerID := range server.dnsMuxMap {
+				_, expected := tt.expectedHandlers[string(handlerID)]
+				assert.True(t, expected, "Unexpected handler found: %s", handlerID)
+			}
+
+			// Verify the handlerChain state and order
+			previousPriority := 0
+			for _, chainEntry := range server.handlerChain.handlers {
+				// Verify priority order
+				if previousPriority > 0 {
+					assert.True(t, chainEntry.Priority <= previousPriority,
+						"Handlers in chain not properly ordered by priority")
+				}
+				previousPriority = chainEntry.Priority
+
+				// Verify handler exists in mux
+				foundInMux := false
+				for _, muxEntry := range server.dnsMuxMap {
+					if chainEntry.Handler == muxEntry.handler &&
+						chainEntry.Priority == muxEntry.priority &&
+						chainEntry.Pattern == dns.Fqdn(muxEntry.domain) {
+						foundInMux = true
+						break
+					}
+				}
+				assert.True(t, foundInMux,
+					"Handler in chain not found in dnsMuxMap")
+			}
+		})
 	}
 }

@@ -1,13 +1,17 @@
 package dns
 
+import (
+	"github.com/netbirdio/netbird/client/internal/statemanager"
+)
+
 type androidHostManager struct {
 }
 
-func newHostManager(wgInterface WGIface) (hostManager, error) {
+func newHostManager() (*androidHostManager, error) {
 	return &androidHostManager{}, nil
 }
 
-func (a androidHostManager) applyDNSConfig(config hostDNSConfig) error {
+func (a androidHostManager) applyDNSConfig(HostDNSConfig, *statemanager.Manager) error {
 	return nil
 }
 

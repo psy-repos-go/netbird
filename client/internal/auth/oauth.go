@@ -26,7 +26,7 @@ type HTTPClient interface {
 }
 
 // AuthFlowInfo holds information for the OAuth 2.0  authorization flow
-type AuthFlowInfo struct {
+type AuthFlowInfo struct { //nolint:revive
 	DeviceCode              string `json:"device_code"`
 	UserCode                string `json:"user_code"`
 	VerificationURI         string `json:"verification_uri"`
@@ -69,6 +69,11 @@ func NewOAuthFlow(ctx context.Context, config *internal.Config, isLinuxDesktopCl
 		return authenticateWithDeviceCodeFlow(ctx, config)
 	}
 
+	// On FreeBSD we currently do not support desktop environments and offer only Device Code Flow (#2384)
+	if runtime.GOOS == "freebsd" {
+		return authenticateWithDeviceCodeFlow(ctx, config)
+	}
+
 	pkceFlow, err := authenticateWithPKCEFlow(ctx, config)
 	if err != nil {
 		// fallback to device code flow
@@ -81,7 +86,7 @@ func NewOAuthFlow(ctx context.Context, config *internal.Config, isLinuxDesktopCl
 
 // authenticateWithPKCEFlow initializes the Proof Key for Code Exchange flow auth flow
 func authenticateWithPKCEFlow(ctx context.Context, config *internal.Config) (OAuthFlow, error) {
-	pkceFlowInfo, err := internal.GetPKCEAuthorizationFlowInfo(ctx, config.PrivateKey, config.ManagementURL)
+	pkceFlowInfo, err := internal.GetPKCEAuthorizationFlowInfo(ctx, config.PrivateKey, config.ManagementURL, config.ClientCertKeyPair)
 	if err != nil {
 		return nil, fmt.Errorf("getting pkce authorization flow info failed with error: %v", err)
 	}

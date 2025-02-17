@@ -1,9 +1,19 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
+
+	nbdns "github.com/netbirdio/netbird/dns"
+	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/management/server/types"
+	"github.com/netbirdio/netbird/management/server/util"
+	"github.com/netbirdio/netbird/route"
 
 	"github.com/netbirdio/netbird/management/server/activity"
 	"github.com/netbirdio/netbird/management/server/status"
@@ -18,316 +28,641 @@ func (e *GroupLinkError) Error() string {
 	return fmt.Sprintf("group has been linked to %s: %s", e.Resource, e.Name)
 }
 
-// Group of the peers for ACL
-type Group struct {
-	// ID of the group
-	ID string
-
-	// AccountID is a reference to Account that this object belongs
-	AccountID string `json:"-" gorm:"index"`
-
-	// Name visible in the UI
-	Name string
-
-	// Issued of the group
-	Issued string
-
-	// Peers list of the group
-	Peers []string `gorm:"serializer:json"`
-
-	IntegrationReference IntegrationReference `gorm:"embedded;embeddedPrefix:integration_ref_"`
-}
-
-// EventMeta returns activity event meta related to the group
-func (g *Group) EventMeta() map[string]any {
-	return map[string]any{"name": g.Name}
-}
-
-func (g *Group) Copy() *Group {
-	group := &Group{
-		ID:                   g.ID,
-		Name:                 g.Name,
-		Issued:               g.Issued,
-		Peers:                make([]string, len(g.Peers)),
-		IntegrationReference: g.IntegrationReference,
-	}
-	copy(group.Peers, g.Peers)
-	return group
-}
-
-// GetGroup object of the peers
-func (am *DefaultAccountManager) GetGroup(accountID, groupID string) (*Group, error) {
-	unlock := am.Store.AcquireAccountLock(accountID)
-	defer unlock()
-
-	account, err := am.Store.GetAccount(accountID)
+// CheckGroupPermissions validates if a user has the necessary permissions to view groups
+func (am *DefaultAccountManager) CheckGroupPermissions(ctx context.Context, accountID, userID string) error {
+	user, err := am.Store.GetUserByUserID(ctx, store.LockingStrengthShare, userID)
 	if err != nil {
+		return err
+	}
+
+	if user.AccountID != accountID {
+		return status.NewUserNotPartOfAccountError()
+	}
+
+	if user.IsRegularUser() {
+		return status.NewAdminPermissionError()
+	}
+
+	return nil
+}
+
+// GetGroup returns a specific group by groupID in an account
+func (am *DefaultAccountManager) GetGroup(ctx context.Context, accountID, groupID, userID string) (*types.Group, error) {
+	if err := am.CheckGroupPermissions(ctx, accountID, userID); err != nil {
 		return nil, err
 	}
+	return am.Store.GetGroupByID(ctx, store.LockingStrengthShare, accountID, groupID)
+}
 
-	group, ok := account.Groups[groupID]
-	if ok {
-		return group, nil
+// GetAllGroups returns all groups in an account
+func (am *DefaultAccountManager) GetAllGroups(ctx context.Context, accountID, userID string) ([]*types.Group, error) {
+	if err := am.CheckGroupPermissions(ctx, accountID, userID); err != nil {
+		return nil, err
 	}
+	return am.Store.GetAccountGroups(ctx, store.LockingStrengthShare, accountID)
+}
 
-	return nil, status.Errorf(status.NotFound, "group with ID %s not found", groupID)
+// GetGroupByName filters all groups in an account by name and returns the one with the most peers
+func (am *DefaultAccountManager) GetGroupByName(ctx context.Context, groupName, accountID string) (*types.Group, error) {
+	return am.Store.GetGroupByName(ctx, store.LockingStrengthShare, accountID, groupName)
 }
 
 // SaveGroup object of the peers
-func (am *DefaultAccountManager) SaveGroup(accountID, userID string, newGroup *Group) error {
-	unlock := am.Store.AcquireAccountLock(accountID)
+func (am *DefaultAccountManager) SaveGroup(ctx context.Context, accountID, userID string, newGroup *types.Group) error {
+	unlock := am.Store.AcquireWriteLockByUID(ctx, accountID)
 	defer unlock()
+	return am.SaveGroups(ctx, accountID, userID, []*types.Group{newGroup})
+}
 
-	account, err := am.Store.GetAccount(accountID)
+// SaveGroups adds new groups to the account.
+// Note: This function does not acquire the global lock.
+// It is the caller's responsibility to ensure proper locking is in place before invoking this method.
+func (am *DefaultAccountManager) SaveGroups(ctx context.Context, accountID, userID string, groups []*types.Group) error {
+	user, err := am.Store.GetUserByUserID(ctx, store.LockingStrengthShare, userID)
 	if err != nil {
 		return err
 	}
-	oldGroup, exists := account.Groups[newGroup.ID]
-	account.Groups[newGroup.ID] = newGroup
 
-	account.Network.IncSerial()
-	if err = am.Store.SaveAccount(account); err != nil {
+	if user.AccountID != accountID {
+		return status.NewUserNotPartOfAccountError()
+	}
+
+	if user.IsRegularUser() {
+		return status.NewAdminPermissionError()
+	}
+
+	var eventsToStore []func()
+	var groupsToSave []*types.Group
+	var updateAccountPeers bool
+
+	err = am.Store.ExecuteInTransaction(ctx, func(transaction store.Store) error {
+		groupIDs := make([]string, 0, len(groups))
+		for _, newGroup := range groups {
+			if err = validateNewGroup(ctx, transaction, accountID, newGroup); err != nil {
+				return err
+			}
+
+			newGroup.AccountID = accountID
+			groupsToSave = append(groupsToSave, newGroup)
+			groupIDs = append(groupIDs, newGroup.ID)
+
+			events := am.prepareGroupEvents(ctx, transaction, accountID, userID, newGroup)
+			eventsToStore = append(eventsToStore, events...)
+		}
+
+		updateAccountPeers, err = areGroupChangesAffectPeers(ctx, transaction, accountID, groupIDs)
+		if err != nil {
+			return err
+		}
+
+		if err = transaction.IncrementNetworkSerial(ctx, store.LockingStrengthUpdate, accountID); err != nil {
+			return err
+		}
+
+		return transaction.SaveGroups(ctx, store.LockingStrengthUpdate, groupsToSave)
+	})
+	if err != nil {
 		return err
 	}
 
-	am.updateAccountPeers(account)
-
-	// the following snippet tracks the activity and stores the group events in the event store.
-	// It has to happen after all the operations have been successfully performed.
-	addedPeers := make([]string, 0)
-	removedPeers := make([]string, 0)
-	if exists {
-		addedPeers = difference(newGroup.Peers, oldGroup.Peers)
-		removedPeers = difference(oldGroup.Peers, newGroup.Peers)
-	} else {
-		addedPeers = append(addedPeers, newGroup.Peers...)
-		am.StoreEvent(userID, newGroup.ID, accountID, activity.GroupCreated, newGroup.EventMeta())
+	for _, storeEvent := range eventsToStore {
+		storeEvent()
 	}
 
-	for _, p := range addedPeers {
-		peer := account.Peers[p]
-		if peer == nil {
-			log.Errorf("peer %s not found under account %s while saving group", p, accountID)
-			continue
-		}
-		am.StoreEvent(userID, peer.ID, accountID, activity.GroupAddedToPeer,
-			map[string]any{
-				"group": newGroup.Name, "group_id": newGroup.ID, "peer_ip": peer.IP.String(),
-				"peer_fqdn": peer.FQDN(am.GetDNSDomain()),
-			})
-	}
-
-	for _, p := range removedPeers {
-		peer := account.Peers[p]
-		if peer == nil {
-			log.Errorf("peer %s not found under account %s while saving group", p, accountID)
-			continue
-		}
-		am.StoreEvent(userID, peer.ID, accountID, activity.GroupRemovedFromPeer,
-			map[string]any{
-				"group": newGroup.Name, "group_id": newGroup.ID, "peer_ip": peer.IP.String(),
-				"peer_fqdn": peer.FQDN(am.GetDNSDomain()),
-			})
+	if updateAccountPeers {
+		am.UpdateAccountPeers(ctx, accountID)
 	}
 
 	return nil
 }
 
-// difference returns the elements in `a` that aren't in `b`.
-func difference(a, b []string) []string {
-	mb := make(map[string]struct{}, len(b))
-	for _, x := range b {
-		mb[x] = struct{}{}
-	}
-	var diff []string
-	for _, x := range a {
-		if _, found := mb[x]; !found {
-			diff = append(diff, x)
-		}
-	}
-	return diff
-}
+// prepareGroupEvents prepares a list of event functions to be stored.
+func (am *DefaultAccountManager) prepareGroupEvents(ctx context.Context, transaction store.Store, accountID, userID string, newGroup *types.Group) []func() {
+	var eventsToStore []func()
 
-// DeleteGroup object of the peers
-func (am *DefaultAccountManager) DeleteGroup(accountId, userId, groupID string) error {
-	unlock := am.Store.AcquireAccountLock(accountId)
-	defer unlock()
+	addedPeers := make([]string, 0)
+	removedPeers := make([]string, 0)
 
-	account, err := am.Store.GetAccount(accountId)
+	oldGroup, err := transaction.GetGroupByID(ctx, store.LockingStrengthShare, accountID, newGroup.ID)
+	if err == nil && oldGroup != nil {
+		addedPeers = util.Difference(newGroup.Peers, oldGroup.Peers)
+		removedPeers = util.Difference(oldGroup.Peers, newGroup.Peers)
+	} else {
+		addedPeers = append(addedPeers, newGroup.Peers...)
+		eventsToStore = append(eventsToStore, func() {
+			am.StoreEvent(ctx, userID, newGroup.ID, accountID, activity.GroupCreated, newGroup.EventMeta())
+		})
+	}
+
+	modifiedPeers := slices.Concat(addedPeers, removedPeers)
+	peers, err := transaction.GetPeersByIDs(ctx, store.LockingStrengthShare, accountID, modifiedPeers)
 	if err != nil {
-		return err
-	}
-
-	g, ok := account.Groups[groupID]
-	if !ok {
+		log.WithContext(ctx).Debugf("failed to get peers for group events: %v", err)
 		return nil
 	}
 
-	// disable a deleting integration group if the initiator is not an admin service user
-	if g.Issued == GroupIssuedIntegration {
-		executingUser := account.Users[userId]
-		if executingUser == nil {
-			return status.Errorf(status.NotFound, "user not found")
+	for _, peerID := range addedPeers {
+		peer, ok := peers[peerID]
+		if !ok {
+			log.WithContext(ctx).Debugf("skipped adding peer: %s GroupAddedToPeer activity: peer not found in store", peerID)
+			continue
 		}
-		if executingUser.Role != UserRoleAdmin || !executingUser.IsServiceUser {
-			return status.Errorf(status.PermissionDenied, "only service users with admin power can delete integration group")
-		}
-	}
 
-	// check route links
-	for _, r := range account.Routes {
-		for _, g := range r.Groups {
-			if g == groupID {
-				return &GroupLinkError{"route", r.NetID}
+		eventsToStore = append(eventsToStore, func() {
+			meta := map[string]any{
+				"group": newGroup.Name, "group_id": newGroup.ID,
+				"peer_ip": peer.IP.String(), "peer_fqdn": peer.FQDN(am.GetDNSDomain()),
 			}
-		}
+			am.StoreEvent(ctx, userID, peer.ID, accountID, activity.GroupAddedToPeer, meta)
+		})
 	}
 
-	// check DNS links
-	for _, dns := range account.NameServerGroups {
-		for _, g := range dns.Groups {
-			if g == groupID {
-				return &GroupLinkError{"name server groups", dns.Name}
+	for _, peerID := range removedPeers {
+		peer, ok := peers[peerID]
+		if !ok {
+			log.WithContext(ctx).Debugf("skipped adding peer: %s GroupRemovedFromPeer activity: peer not found in store", peerID)
+			continue
+		}
+
+		eventsToStore = append(eventsToStore, func() {
+			meta := map[string]any{
+				"group": newGroup.Name, "group_id": newGroup.ID,
+				"peer_ip": peer.IP.String(), "peer_fqdn": peer.FQDN(am.GetDNSDomain()),
 			}
-		}
+			am.StoreEvent(ctx, userID, peer.ID, accountID, activity.GroupRemovedFromPeer, meta)
+		})
 	}
 
-	// check ACL links
-	for _, policy := range account.Policies {
-		for _, rule := range policy.Rules {
-			for _, src := range rule.Sources {
-				if src == groupID {
-					return &GroupLinkError{"policy", policy.Name}
-				}
-			}
+	return eventsToStore
+}
 
-			for _, dst := range rule.Destinations {
-				if dst == groupID {
-					return &GroupLinkError{"policy", policy.Name}
-				}
-			}
-		}
-	}
+// DeleteGroup object of the peers.
+func (am *DefaultAccountManager) DeleteGroup(ctx context.Context, accountID, userID, groupID string) error {
+	unlock := am.Store.AcquireWriteLockByUID(ctx, accountID)
+	defer unlock()
+	return am.DeleteGroups(ctx, accountID, userID, []string{groupID})
+}
 
-	// check setup key links
-	for _, setupKey := range account.SetupKeys {
-		for _, grp := range setupKey.AutoGroups {
-			if grp == groupID {
-				return &GroupLinkError{"setup key", setupKey.Name}
-			}
-		}
-	}
-
-	// check user links
-	for _, user := range account.Users {
-		for _, grp := range user.AutoGroups {
-			if grp == groupID {
-				return &GroupLinkError{"user", user.Id}
-			}
-		}
-	}
-
-	// check DisabledManagementGroups
-	for _, disabledMgmGrp := range account.DNSSettings.DisabledManagementGroups {
-		if disabledMgmGrp == groupID {
-			return &GroupLinkError{"disabled DNS management groups", g.Name}
-		}
-	}
-
-	delete(account.Groups, groupID)
-
-	account.Network.IncSerial()
-	if err = am.Store.SaveAccount(account); err != nil {
+// DeleteGroups deletes groups from an account.
+// Note: This function does not acquire the global lock.
+// It is the caller's responsibility to ensure proper locking is in place before invoking this method.
+//
+// If an error occurs while deleting a group, the function skips it and continues deleting other groups.
+// Errors are collected and returned at the end.
+func (am *DefaultAccountManager) DeleteGroups(ctx context.Context, accountID, userID string, groupIDs []string) error {
+	user, err := am.Store.GetUserByUserID(ctx, store.LockingStrengthShare, userID)
+	if err != nil {
 		return err
 	}
 
-	am.StoreEvent(userId, groupID, accountId, activity.GroupDeleted, g.EventMeta())
+	if user.AccountID != accountID {
+		return status.NewUserNotPartOfAccountError()
+	}
 
-	am.updateAccountPeers(account)
+	if user.IsRegularUser() {
+		return status.NewAdminPermissionError()
+	}
+
+	var allErrors error
+	var groupIDsToDelete []string
+	var deletedGroups []*types.Group
+
+	err = am.Store.ExecuteInTransaction(ctx, func(transaction store.Store) error {
+		for _, groupID := range groupIDs {
+			group, err := transaction.GetGroupByID(ctx, store.LockingStrengthUpdate, accountID, groupID)
+			if err != nil {
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+
+			if err := validateDeleteGroup(ctx, transaction, group, userID); err != nil {
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+
+			groupIDsToDelete = append(groupIDsToDelete, groupID)
+			deletedGroups = append(deletedGroups, group)
+		}
+
+		if err = transaction.IncrementNetworkSerial(ctx, store.LockingStrengthUpdate, accountID); err != nil {
+			return err
+		}
+
+		return transaction.DeleteGroups(ctx, store.LockingStrengthUpdate, accountID, groupIDsToDelete)
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, group := range deletedGroups {
+		am.StoreEvent(ctx, userID, group.ID, accountID, activity.GroupDeleted, group.EventMeta())
+	}
+
+	return allErrors
+}
+
+// GroupAddPeer appends peer to the group
+func (am *DefaultAccountManager) GroupAddPeer(ctx context.Context, accountID, groupID, peerID string) error {
+	unlock := am.Store.AcquireWriteLockByUID(ctx, accountID)
+	defer unlock()
+
+	var group *types.Group
+	var updateAccountPeers bool
+	var err error
+
+	err = am.Store.ExecuteInTransaction(ctx, func(transaction store.Store) error {
+		group, err = transaction.GetGroupByID(context.Background(), store.LockingStrengthUpdate, accountID, groupID)
+		if err != nil {
+			return err
+		}
+
+		if updated := group.AddPeer(peerID); !updated {
+			return nil
+		}
+
+		updateAccountPeers, err = areGroupChangesAffectPeers(ctx, transaction, accountID, []string{groupID})
+		if err != nil {
+			return err
+		}
+
+		if err = transaction.IncrementNetworkSerial(ctx, store.LockingStrengthUpdate, accountID); err != nil {
+			return err
+		}
+
+		return transaction.SaveGroup(ctx, store.LockingStrengthUpdate, group)
+	})
+	if err != nil {
+		return err
+	}
+
+	if updateAccountPeers {
+		am.UpdateAccountPeers(ctx, accountID)
+	}
 
 	return nil
 }
 
-// ListGroups objects of the peers
-func (am *DefaultAccountManager) ListGroups(accountID string) ([]*Group, error) {
-	unlock := am.Store.AcquireAccountLock(accountID)
+// GroupAddResource appends resource to the group
+func (am *DefaultAccountManager) GroupAddResource(ctx context.Context, accountID, groupID string, resource types.Resource) error {
+	unlock := am.Store.AcquireWriteLockByUID(ctx, accountID)
 	defer unlock()
 
-	account, err := am.Store.GetAccount(accountID)
-	if err != nil {
-		return nil, err
-	}
+	var group *types.Group
+	var updateAccountPeers bool
+	var err error
 
-	groups := make([]*Group, 0, len(account.Groups))
-	for _, item := range account.Groups {
-		groups = append(groups, item)
-	}
-
-	return groups, nil
-}
-
-// GroupAddPeer appends peer to the group
-func (am *DefaultAccountManager) GroupAddPeer(accountID, groupID, peerID string) error {
-	unlock := am.Store.AcquireAccountLock(accountID)
-	defer unlock()
-
-	account, err := am.Store.GetAccount(accountID)
-	if err != nil {
-		return err
-	}
-
-	group, ok := account.Groups[groupID]
-	if !ok {
-		return status.Errorf(status.NotFound, "group with ID %s not found", groupID)
-	}
-
-	add := true
-	for _, itemID := range group.Peers {
-		if itemID == peerID {
-			add = false
-			break
+	err = am.Store.ExecuteInTransaction(ctx, func(transaction store.Store) error {
+		group, err = transaction.GetGroupByID(context.Background(), store.LockingStrengthUpdate, accountID, groupID)
+		if err != nil {
+			return err
 		}
-	}
-	if add {
-		group.Peers = append(group.Peers, peerID)
-	}
 
-	account.Network.IncSerial()
-	if err = am.Store.SaveAccount(account); err != nil {
+		if updated := group.AddResource(resource); !updated {
+			return nil
+		}
+
+		updateAccountPeers, err = areGroupChangesAffectPeers(ctx, transaction, accountID, []string{groupID})
+		if err != nil {
+			return err
+		}
+
+		if err = transaction.IncrementNetworkSerial(ctx, store.LockingStrengthUpdate, accountID); err != nil {
+			return err
+		}
+
+		return transaction.SaveGroup(ctx, store.LockingStrengthUpdate, group)
+	})
+	if err != nil {
 		return err
 	}
 
-	am.updateAccountPeers(account)
+	if updateAccountPeers {
+		am.UpdateAccountPeers(ctx, accountID)
+	}
 
 	return nil
 }
 
 // GroupDeletePeer removes peer from the group
-func (am *DefaultAccountManager) GroupDeletePeer(accountID, groupID, peerID string) error {
-	unlock := am.Store.AcquireAccountLock(accountID)
+func (am *DefaultAccountManager) GroupDeletePeer(ctx context.Context, accountID, groupID, peerID string) error {
+	unlock := am.Store.AcquireWriteLockByUID(ctx, accountID)
 	defer unlock()
 
-	account, err := am.Store.GetAccount(accountID)
+	var group *types.Group
+	var updateAccountPeers bool
+	var err error
+
+	err = am.Store.ExecuteInTransaction(ctx, func(transaction store.Store) error {
+		group, err = transaction.GetGroupByID(context.Background(), store.LockingStrengthUpdate, accountID, groupID)
+		if err != nil {
+			return err
+		}
+
+		if updated := group.RemovePeer(peerID); !updated {
+			return nil
+		}
+
+		updateAccountPeers, err = areGroupChangesAffectPeers(ctx, transaction, accountID, []string{groupID})
+		if err != nil {
+			return err
+		}
+
+		if err = transaction.IncrementNetworkSerial(ctx, store.LockingStrengthUpdate, accountID); err != nil {
+			return err
+		}
+
+		return transaction.SaveGroup(ctx, store.LockingStrengthUpdate, group)
+	})
 	if err != nil {
 		return err
 	}
 
-	group, ok := account.Groups[groupID]
-	if !ok {
-		return status.Errorf(status.NotFound, "group with ID %s not found", groupID)
+	if updateAccountPeers {
+		am.UpdateAccountPeers(ctx, accountID)
 	}
 
-	account.Network.IncSerial()
-	for i, itemID := range group.Peers {
-		if itemID == peerID {
-			group.Peers = append(group.Peers[:i], group.Peers[i+1:]...)
-			if err := am.Store.SaveAccount(account); err != nil {
+	return nil
+}
+
+// GroupDeleteResource removes resource from the group
+func (am *DefaultAccountManager) GroupDeleteResource(ctx context.Context, accountID, groupID string, resource types.Resource) error {
+	unlock := am.Store.AcquireWriteLockByUID(ctx, accountID)
+	defer unlock()
+
+	var group *types.Group
+	var updateAccountPeers bool
+	var err error
+
+	err = am.Store.ExecuteInTransaction(ctx, func(transaction store.Store) error {
+		group, err = transaction.GetGroupByID(context.Background(), store.LockingStrengthUpdate, accountID, groupID)
+		if err != nil {
+			return err
+		}
+
+		if updated := group.RemoveResource(resource); !updated {
+			return nil
+		}
+
+		updateAccountPeers, err = areGroupChangesAffectPeers(ctx, transaction, accountID, []string{groupID})
+		if err != nil {
+			return err
+		}
+
+		if err = transaction.IncrementNetworkSerial(ctx, store.LockingStrengthUpdate, accountID); err != nil {
+			return err
+		}
+
+		return transaction.SaveGroup(ctx, store.LockingStrengthUpdate, group)
+	})
+	if err != nil {
+		return err
+	}
+
+	if updateAccountPeers {
+		am.UpdateAccountPeers(ctx, accountID)
+	}
+
+	return nil
+}
+
+// validateNewGroup validates the new group for existence and required fields.
+func validateNewGroup(ctx context.Context, transaction store.Store, accountID string, newGroup *types.Group) error {
+	if newGroup.ID == "" && newGroup.Issued != types.GroupIssuedAPI {
+		return status.Errorf(status.InvalidArgument, "%s group without ID set", newGroup.Issued)
+	}
+
+	if newGroup.ID == "" && newGroup.Issued == types.GroupIssuedAPI {
+		existingGroup, err := transaction.GetGroupByName(ctx, store.LockingStrengthShare, accountID, newGroup.Name)
+		if err != nil {
+			if s, ok := status.FromError(err); !ok || s.Type() != status.NotFound {
 				return err
+			}
+		}
+
+		// Prevent duplicate groups for API-issued groups.
+		// Integration or JWT groups can be duplicated as they are coming from the IdP that we don't have control of.
+		if existingGroup != nil {
+			return status.Errorf(status.AlreadyExists, "group with name %s already exists", newGroup.Name)
+		}
+
+		newGroup.ID = xid.New().String()
+	}
+
+	for _, peerID := range newGroup.Peers {
+		_, err := transaction.GetPeerByID(ctx, store.LockingStrengthShare, accountID, peerID)
+		if err != nil {
+			return status.Errorf(status.InvalidArgument, "peer with ID \"%s\" not found", peerID)
+		}
+	}
+
+	return nil
+}
+
+func validateDeleteGroup(ctx context.Context, transaction store.Store, group *types.Group, userID string) error {
+	// disable a deleting integration group if the initiator is not an admin service user
+	if group.Issued == types.GroupIssuedIntegration {
+		executingUser, err := transaction.GetUserByUserID(ctx, store.LockingStrengthShare, userID)
+		if err != nil {
+			return status.Errorf(status.Internal, "failed to get user")
+		}
+		if executingUser.Role != types.UserRoleAdmin || !executingUser.IsServiceUser {
+			return status.Errorf(status.PermissionDenied, "only service users with admin power can delete integration group")
+		}
+	}
+
+	if group.IsGroupAll() {
+		return status.Errorf(status.InvalidArgument, "deleting group ALL is not allowed")
+	}
+
+	if len(group.Resources) > 0 {
+		return &GroupLinkError{"network resource", group.Resources[0].ID}
+	}
+
+	if isLinked, linkedRoute := isGroupLinkedToRoute(ctx, transaction, group.AccountID, group.ID); isLinked {
+		return &GroupLinkError{"route", string(linkedRoute.NetID)}
+	}
+
+	if isLinked, linkedDns := isGroupLinkedToDns(ctx, transaction, group.AccountID, group.ID); isLinked {
+		return &GroupLinkError{"name server groups", linkedDns.Name}
+	}
+
+	if isLinked, linkedPolicy := isGroupLinkedToPolicy(ctx, transaction, group.AccountID, group.ID); isLinked {
+		return &GroupLinkError{"policy", linkedPolicy.Name}
+	}
+
+	if isLinked, linkedSetupKey := isGroupLinkedToSetupKey(ctx, transaction, group.AccountID, group.ID); isLinked {
+		return &GroupLinkError{"setup key", linkedSetupKey.Name}
+	}
+
+	if isLinked, linkedUser := isGroupLinkedToUser(ctx, transaction, group.AccountID, group.ID); isLinked {
+		return &GroupLinkError{"user", linkedUser.Id}
+	}
+
+	return checkGroupLinkedToSettings(ctx, transaction, group)
+}
+
+// checkGroupLinkedToSettings verifies if a group is linked to any settings in the account.
+func checkGroupLinkedToSettings(ctx context.Context, transaction store.Store, group *types.Group) error {
+	dnsSettings, err := transaction.GetAccountDNSSettings(ctx, store.LockingStrengthShare, group.AccountID)
+	if err != nil {
+		return status.Errorf(status.Internal, "failed to get DNS settings")
+	}
+
+	if slices.Contains(dnsSettings.DisabledManagementGroups, group.ID) {
+		return &GroupLinkError{"disabled DNS management groups", group.Name}
+	}
+
+	settings, err := transaction.GetAccountSettings(ctx, store.LockingStrengthShare, group.AccountID)
+	if err != nil {
+		return status.Errorf(status.Internal, "failed to get account settings")
+	}
+
+	if settings.Extra != nil && slices.Contains(settings.Extra.IntegratedValidatorGroups, group.ID) {
+		return &GroupLinkError{"integrated validator", group.Name}
+	}
+
+	return nil
+}
+
+// isGroupLinkedToRoute checks if a group is linked to any route in the account.
+func isGroupLinkedToRoute(ctx context.Context, transaction store.Store, accountID string, groupID string) (bool, *route.Route) {
+	routes, err := transaction.GetAccountRoutes(ctx, store.LockingStrengthShare, accountID)
+	if err != nil {
+		log.WithContext(ctx).Errorf("error retrieving routes while checking group linkage: %v", err)
+		return false, nil
+	}
+
+	for _, r := range routes {
+		isLinked := slices.Contains(r.Groups, groupID) ||
+			slices.Contains(r.PeerGroups, groupID) ||
+			slices.Contains(r.AccessControlGroups, groupID)
+		if isLinked {
+			return true, r
+		}
+	}
+
+	return false, nil
+}
+
+// isGroupLinkedToPolicy checks if a group is linked to any policy in the account.
+func isGroupLinkedToPolicy(ctx context.Context, transaction store.Store, accountID string, groupID string) (bool, *types.Policy) {
+	policies, err := transaction.GetAccountPolicies(ctx, store.LockingStrengthShare, accountID)
+	if err != nil {
+		log.WithContext(ctx).Errorf("error retrieving policies while checking group linkage: %v", err)
+		return false, nil
+	}
+
+	for _, policy := range policies {
+		for _, rule := range policy.Rules {
+			if slices.Contains(rule.Sources, groupID) || slices.Contains(rule.Destinations, groupID) {
+				return true, policy
+			}
+		}
+	}
+	return false, nil
+}
+
+// isGroupLinkedToDns checks if a group is linked to any nameserver group in the account.
+func isGroupLinkedToDns(ctx context.Context, transaction store.Store, accountID string, groupID string) (bool, *nbdns.NameServerGroup) {
+	nameServerGroups, err := transaction.GetAccountNameServerGroups(ctx, store.LockingStrengthShare, accountID)
+	if err != nil {
+		log.WithContext(ctx).Errorf("error retrieving name server groups while checking group linkage: %v", err)
+		return false, nil
+	}
+
+	for _, dns := range nameServerGroups {
+		for _, g := range dns.Groups {
+			if g == groupID {
+				return true, dns
 			}
 		}
 	}
 
-	am.updateAccountPeers(account)
+	return false, nil
+}
 
-	return nil
+// isGroupLinkedToSetupKey checks if a group is linked to any setup key in the account.
+func isGroupLinkedToSetupKey(ctx context.Context, transaction store.Store, accountID string, groupID string) (bool, *types.SetupKey) {
+	setupKeys, err := transaction.GetAccountSetupKeys(ctx, store.LockingStrengthShare, accountID)
+	if err != nil {
+		log.WithContext(ctx).Errorf("error retrieving setup keys while checking group linkage: %v", err)
+		return false, nil
+	}
+
+	for _, setupKey := range setupKeys {
+		if slices.Contains(setupKey.AutoGroups, groupID) {
+			return true, setupKey
+		}
+	}
+	return false, nil
+}
+
+// isGroupLinkedToUser checks if a group is linked to any user in the account.
+func isGroupLinkedToUser(ctx context.Context, transaction store.Store, accountID string, groupID string) (bool, *types.User) {
+	users, err := transaction.GetAccountUsers(ctx, store.LockingStrengthShare, accountID)
+	if err != nil {
+		log.WithContext(ctx).Errorf("error retrieving users while checking group linkage: %v", err)
+		return false, nil
+	}
+
+	for _, user := range users {
+		if slices.Contains(user.AutoGroups, groupID) {
+			return true, user
+		}
+	}
+	return false, nil
+}
+
+// areGroupChangesAffectPeers checks if any changes to the specified groups will affect peers.
+func areGroupChangesAffectPeers(ctx context.Context, transaction store.Store, accountID string, groupIDs []string) (bool, error) {
+	if len(groupIDs) == 0 {
+		return false, nil
+	}
+
+	dnsSettings, err := transaction.GetAccountDNSSettings(ctx, store.LockingStrengthShare, accountID)
+	if err != nil {
+		return false, err
+	}
+
+	for _, groupID := range groupIDs {
+		if slices.Contains(dnsSettings.DisabledManagementGroups, groupID) {
+			return true, nil
+		}
+		if linked, _ := isGroupLinkedToDns(ctx, transaction, accountID, groupID); linked {
+			return true, nil
+		}
+		if linked, _ := isGroupLinkedToPolicy(ctx, transaction, accountID, groupID); linked {
+			return true, nil
+		}
+		if linked, _ := isGroupLinkedToRoute(ctx, transaction, accountID, groupID); linked {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (am *DefaultAccountManager) anyGroupHasPeers(account *types.Account, groupIDs []string) bool {
+	for _, groupID := range groupIDs {
+		if group, exists := account.Groups[groupID]; exists && group.HasPeers() {
+			return true
+		}
+	}
+	return false
+}
+
+// anyGroupHasPeersOrResources checks if any of the given groups in the account have peers or resources.
+func anyGroupHasPeersOrResources(ctx context.Context, transaction store.Store, accountID string, groupIDs []string) (bool, error) {
+	groups, err := transaction.GetGroupsByIDs(ctx, store.LockingStrengthShare, accountID, groupIDs)
+	if err != nil {
+		return false, err
+	}
+
+	for _, group := range groups {
+		if group.HasPeers() || group.HasResources() {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

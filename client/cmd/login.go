@@ -39,6 +39,11 @@ var loginCmd = &cobra.Command{
 			ctx = context.WithValue(ctx, system.DeviceNameCtxKey, hostName)
 		}
 
+		providedSetupKey, err := getSetupKey()
+		if err != nil {
+			return err
+		}
+
 		// workaround to run without service
 		if logFile == "console" {
 			err = handleRebrand(cmd)
@@ -51,7 +56,7 @@ var loginCmd = &cobra.Command{
 				AdminURL:      adminURL,
 				ConfigPath:    configPath,
 			}
-			if preSharedKey != "" {
+			if rootCmd.PersistentFlags().Changed(preSharedKeyFlag) {
 				ic.PreSharedKey = &preSharedKey
 			}
 
@@ -60,9 +65,9 @@ var loginCmd = &cobra.Command{
 				return fmt.Errorf("get config file: %v", err)
 			}
 
-			config, _ = internal.UpdateOldManagementPort(ctx, config, configPath)
+			config, _ = internal.UpdateOldManagementURL(ctx, config, configPath)
 
-			err = foregroundLogin(ctx, cmd, config, setupKey)
+			err = foregroundLogin(ctx, cmd, config, providedSetupKey)
 			if err != nil {
 				return fmt.Errorf("foreground login failed: %v", err)
 			}
@@ -81,11 +86,14 @@ var loginCmd = &cobra.Command{
 		client := proto.NewDaemonServiceClient(conn)
 
 		loginRequest := proto.LoginRequest{
-			SetupKey:             setupKey,
-			PreSharedKey:         preSharedKey,
+			SetupKey:             providedSetupKey,
 			ManagementUrl:        managementURL,
 			IsLinuxDesktopClient: isLinuxRunningDesktop(),
 			Hostname:             hostName,
+		}
+
+		if rootCmd.PersistentFlags().Changed(preSharedKeyFlag) {
+			loginRequest.OptionalPreSharedKey = &preSharedKey
 		}
 
 		var loginErr error
@@ -151,13 +159,21 @@ func foregroundLogin(ctx context.Context, cmd *cobra.Command, config *internal.C
 		jwtToken = tokenInfo.GetTokenToUse()
 	}
 
+	var lastError error
+
 	err = WithBackOff(func() error {
 		err := internal.Login(ctx, config, setupKey, jwtToken)
 		if s, ok := gstatus.FromError(err); ok && (s.Code() == codes.InvalidArgument || s.Code() == codes.PermissionDenied) {
+			lastError = err
 			return nil
 		}
 		return err
 	})
+
+	if lastError != nil {
+		return fmt.Errorf("login failed: %v", lastError)
+	}
+
 	if err != nil {
 		return fmt.Errorf("backoff cycle failed: %v", err)
 	}

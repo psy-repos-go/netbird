@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ func TestUpstreamResolver_ServeDNS(t *testing.T) {
 		timeout             time.Duration
 		cancelCTX           bool
 		expectedAnswer      string
+		acceptNXDomain      bool
 	}{
 		{
 			name:           "Should Resolve A Record",
@@ -35,11 +37,11 @@ func TestUpstreamResolver_ServeDNS(t *testing.T) {
 			expectedAnswer: "1.1.1.1",
 		},
 		{
-			name:                "Should Not Resolve If Can't Connect To Both Servers",
-			inputMSG:            new(dns.Msg).SetQuestion("one.one.one.one.", dns.TypeA),
-			InputServers:        []string{"8.0.0.0:53", "8.0.0.1:53"},
-			timeout:             200 * time.Millisecond,
-			responseShouldBeNil: true,
+			name:           "Should Not Resolve If Can't Connect To Both Servers",
+			inputMSG:       new(dns.Msg).SetQuestion("one.one.one.one.", dns.TypeA),
+			InputServers:   []string{"8.0.0.0:53", "8.0.0.1:53"},
+			timeout:        200 * time.Millisecond,
+			acceptNXDomain: true,
 		},
 		{
 			name:                "Should Not Resolve If Parent Context Is Canceled",
@@ -49,24 +51,12 @@ func TestUpstreamResolver_ServeDNS(t *testing.T) {
 			timeout:             upstreamTimeout,
 			responseShouldBeNil: true,
 		},
-		//{
-		//	name:        "Should Resolve CNAME Record",
-		//	inputMSG:    new(dns.Msg).SetQuestion("one.one.one.one", dns.TypeCNAME),
-		//},
-		//{
-		//	name:                "Should Not Write When Not Found A Record",
-		//	inputMSG:            new(dns.Msg).SetQuestion("not.found.com", dns.TypeA),
-		//	responseShouldBeNil: true,
-		//},
 	}
-	// should resolve if first upstream times out
-	// should not write when both fails
-	// should not resolve if parent context is canceled
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.TODO())
-			resolver := newUpstreamResolver(ctx)
+			resolver, _ := newUpstreamResolver(ctx, "", net.IP{}, &net.IPNet{}, nil, nil, ".")
 			resolver.upstreamServers = testCase.InputServers
 			resolver.upstreamTimeout = testCase.timeout
 			if testCase.cancelCTX {
@@ -92,16 +82,22 @@ func TestUpstreamResolver_ServeDNS(t *testing.T) {
 				t.Fatalf("should write a response message")
 			}
 
-			foundAnswer := false
-			for _, answer := range responseMSG.Answer {
-				if strings.Contains(answer.String(), testCase.expectedAnswer) {
-					foundAnswer = true
-					break
-				}
+			if testCase.acceptNXDomain && responseMSG.Rcode == dns.RcodeNameError {
+				return
 			}
 
-			if !foundAnswer {
-				t.Errorf("couldn't find the required answer, %s, in the dns response", testCase.expectedAnswer)
+			if testCase.expectedAnswer != "" {
+				foundAnswer := false
+				for _, answer := range responseMSG.Answer {
+					if strings.Contains(answer.String(), testCase.expectedAnswer) {
+						foundAnswer = true
+						break
+					}
+				}
+
+				if !foundAnswer {
+					t.Errorf("couldn't find the required answer, %s, in the dns response", testCase.expectedAnswer)
+				}
 			}
 		})
 	}
@@ -113,13 +109,13 @@ type mockUpstreamResolver struct {
 	err error
 }
 
-// ExchangeContext mock implementation of ExchangeContext from upstreamResolver
-func (c mockUpstreamResolver) ExchangeContext(_ context.Context, _ *dns.Msg, _ string) (r *dns.Msg, rtt time.Duration, err error) {
+// exchange mock implementation of exchange from upstreamResolver
+func (c mockUpstreamResolver) exchange(_ context.Context, _ string, _ *dns.Msg) (*dns.Msg, time.Duration, error) {
 	return c.r, c.rtt, c.err
 }
 
 func TestUpstreamResolver_DeactivationReactivation(t *testing.T) {
-	resolver := &upstreamResolver{
+	resolver := &upstreamResolverBase{
 		ctx: context.TODO(),
 		upstreamClient: &mockUpstreamResolver{
 			err: nil,
@@ -139,7 +135,7 @@ func TestUpstreamResolver_DeactivationReactivation(t *testing.T) {
 	}
 
 	failed := false
-	resolver.deactivate = func() {
+	resolver.deactivate = func(error) {
 		failed = true
 	}
 
@@ -156,7 +152,7 @@ func TestUpstreamResolver_DeactivationReactivation(t *testing.T) {
 	}
 
 	if !resolver.disabled {
-		t.Errorf("resolver should be disabled")
+		t.Errorf("resolver should be Disabled")
 		return
 	}
 
