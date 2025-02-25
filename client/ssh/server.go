@@ -118,9 +118,9 @@ func (srv *DefaultServer) publicKeyHandler(ctx ssh.Context, key ssh.PublicKey) b
 
 func prepareUserEnv(user *user.User, shell string) []string {
 	return []string{
-		fmt.Sprintf("SHELL=" + shell),
-		fmt.Sprintf("USER=" + user.Username),
-		fmt.Sprintf("HOME=" + user.HomeDir),
+		fmt.Sprint("SHELL=" + shell),
+		fmt.Sprint("USER=" + user.Username),
+		fmt.Sprint("HOME=" + user.HomeDir),
 	}
 }
 
@@ -168,8 +168,12 @@ func (srv *DefaultServer) sessionHandler(session ssh.Session) {
 		cmd := exec.Command(loginCmd, loginArgs...)
 		go func() {
 			<-session.Context().Done()
+			if cmd.Process == nil {
+				return
+			}
 			err := cmd.Process.Kill()
 			if err != nil {
+				log.Debugf("failed killing SSH process %v", err)
 				return
 			}
 		}()
@@ -185,7 +189,7 @@ func (srv *DefaultServer) sessionHandler(session ssh.Session) {
 		log.Debugf("Login command: %s", cmd.String())
 		file, err := pty.Start(cmd)
 		if err != nil {
-			log.Errorf("failed starting SSH server %v", err)
+			log.Errorf("failed starting SSH server: %v", err)
 		}
 
 		go func() {

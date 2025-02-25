@@ -1,4 +1,4 @@
-openapi: 3.0.1
+openapi: 3.1.0
 servers:
   - url: https://api.netbird.io
     description: Default server
@@ -17,10 +17,10 @@ tags:
     description: Interact with and view information about setup keys.
   - name: Groups
     description: Interact with and view information about groups.
-  - name: Rules
-    description: Interact with and view information about rules.
   - name: Policies
     description: Interact with and view information about policies.
+  - name: Posture Checks
+    description: Interact with and view information about posture checks.
   - name: Routes
     description: Interact with and view information about routes.
   - name: DNS
@@ -54,6 +54,18 @@ components:
           description: Period of time after which peer login expires (seconds).
           type: integer
           example: 43200
+        peer_inactivity_expiration_enabled:
+          description: Enables or disables peer inactivity expiration globally. After peer's session has expired the user has to log in (authenticate). Applies only to peers that were added by a user (interactive SSO login).
+          type: boolean
+          example: true
+        peer_inactivity_expiration:
+          description: Period of time of inactivity after which peer session expires (seconds).
+          type: integer
+          example: 43200
+        regular_users_view_blocked:
+          description: Allows blocking regular users from viewing parts of the system.
+          type: boolean
+          example: true
         groups_propagation_enabled:
           description: Allows propagate the new user auto groups to peers that belongs to the user
           type: boolean
@@ -66,11 +78,24 @@ components:
           description: Name of the claim from which we extract groups names to add it to account groups.
           type: string
           example: "roles"
+        jwt_allow_groups:
+          description: List of groups to which users are allowed access
+          type: array
+          items:
+            type: string
+            example: Administrators
+        routing_peer_dns_resolution_enabled:
+          description: Enables or disables DNS resolution on the routing peers
+          type: boolean
+          example: true
         extra:
           $ref: '#/components/schemas/AccountExtraSettings'
       required:
         - peer_login_expiration_enabled
         - peer_login_expiration
+        - peer_inactivity_expiration_enabled
+        - peer_inactivity_expiration
+        - regular_users_view_blocked
     AccountExtraSettings:
       type: object
       properties:
@@ -113,13 +138,13 @@ components:
           description: Last time this user performed a login to the dashboard
           type: string
           format: date-time
-          example: 2023-05-05T09:00:35.477782Z
+          example: "2023-05-05T09:00:35.477782Z"
         auto_groups:
-          description: Groups to auto-assign to peers registered by this user
+          description: Group IDs to auto-assign to peers registered by this user
           type: array
           items:
             type: string
-            example: devs
+            example: ch8i4ug6lnn4g9hqv7m0
         is_current:
           description: Is true if authenticated user is the same as this user
           type: boolean
@@ -138,6 +163,8 @@ components:
           description: How user was issued by API or Integration
           type: string
           example: api
+        permissions:
+            $ref: '#/components/schemas/UserPermissions'
       required:
         - id
         - email
@@ -146,6 +173,14 @@ components:
         - auto_groups
         - status
         - is_blocked
+    UserPermissions:
+      type: object
+      properties:
+        dashboard_view:
+          description: User's permission to view the dashboard
+          type: string
+          enum: [ "limited", "blocked", "full" ]
+          example: limited
     UserRequest:
       type: object
       properties:
@@ -154,11 +189,11 @@ components:
           type: string
           example: admin
         auto_groups:
-          description: Groups to auto-assign to peers registered by this user
+          description: Group IDs to auto-assign to peers registered by this user
           type: array
           items:
             type: string
-            example: devs
+            example: ch8i4ug6lnn4g9hqv7m0
         is_blocked:
           description: If set to true then user is blocked and can't use the system
           type: boolean
@@ -183,11 +218,11 @@ components:
           type: string
           example: admin
         auto_groups:
-          description: Groups to auto-assign to peers registered by this user
+          description: Group IDs to auto-assign to peers registered by this user
           type: array
           items:
             type: string
-            example: devs
+            example: ch8i4ug6lnn4g9hqv7m0
         is_service_user:
           description: Is true if this user is a service user
           type: boolean
@@ -222,6 +257,9 @@ components:
         login_expiration_enabled:
           type: boolean
           example: false
+        inactivity_expiration_enabled:
+          type: boolean
+          example: false
         approval_required:
           description: (Cloud only) Indicates whether peer needs approval
           type: boolean
@@ -230,7 +268,8 @@ components:
         - name
         - ssh_enabled
         - login_expiration_enabled
-    PeerBase:
+        - inactivity_expiration_enabled
+    Peer:
       allOf:
         - $ref: '#/components/schemas/PeerMinimum'
         - type: object
@@ -239,6 +278,10 @@ components:
               description: Peer's IP address
               type: string
               example: 10.64.0.1
+            connection_ip:
+              description: Peer's public connection IP address
+              type: string
+              example: 35.64.0.1
             connected:
               description: Peer to Management connection status
               type: boolean
@@ -247,11 +290,19 @@ components:
               description: Last time peer connected to Netbird's management service
               type: string
               format: date-time
-              example: 2023-05-05T10:05:26.420578Z
+              example: "2023-05-05T10:05:26.420578Z"
             os:
               description: Peer's operating system and version
               type: string
               example: Darwin 13.2.1
+            kernel_version:
+              description: Peer's operating system kernel version
+              type: string
+              example: 23.2.0
+            geoname_id:
+              description: Unique identifier from the GeoNames database for a specific geographical location.
+              type: integer
+              example: 2643743
             version:
               description: Peer's daemon or cli version
               type: string
@@ -293,24 +344,53 @@ components:
               description: Last time this peer performed log in (authentication). E.g., user authenticated.
               type: string
               format: date-time
-              example: 2023-05-05T09:00:35.477782Z
+              example: "2023-05-05T09:00:35.477782Z"
+            inactivity_expiration_enabled:
+              description: Indicates whether peer inactivity expiration has been enabled or not
+              type: boolean
+              example: false
             approval_required:
               description: (Cloud only) Indicates whether peer needs approval
               type: boolean
               example: true
+            country_code:
+              $ref: '#/components/schemas/CountryCode'
+            city_name:
+              $ref: '#/components/schemas/CityName'
+            serial_number:
+              description: System serial number
+              type: string
+              example: "C02XJ0J0JGH7"
+            extra_dns_labels:
+              description: Extra DNS labels added to the peer
+              type: array
+              items:
+                type: string
+                example: "stage-host-1"
           required:
-            - ip
+            - city_name
             - connected
-            - last_seen
-            - os
-            - version
-            - groups
-            - ssh_enabled
-            - hostname
+            - connection_ip
+            - country_code
             - dns_label
+            - geoname_id
+            - groups
+            - hostname
+            - ip
+            - kernel_version
+            - last_login
+            - last_seen
             - login_expiration_enabled
             - login_expired
-            - last_login
+            - inactivity_expiration_enabled
+            - os
+            - ssh_enabled
+            - user_id
+            - version
+            - ui_version
+            - approval_required
+            - serial_number
+            - extra_dns_labels
     AccessiblePeer:
       allOf:
         - $ref: '#/components/schemas/PeerMinimum'
@@ -328,25 +408,40 @@ components:
               description: User ID of the user that enrolled this peer
               type: string
               example: google-oauth2|277474792786460067937
+            os:
+              description: Peer's operating system and version
+              type: string
+              example: linux
+            country_code:
+              $ref: '#/components/schemas/CountryCode'
+            city_name:
+              $ref: '#/components/schemas/CityName'
+            geoname_id:
+              description: Unique identifier from the GeoNames database for a specific geographical location.
+              type: integer
+              example: 2643743
+            connected:
+              description: Peer to Management connection status
+              type: boolean
+              example: true
+            last_seen:
+              description: Last time peer connected to Netbird's management service
+              type: string
+              format: date-time
+              example: "2023-05-05T10:05:26.420578Z"
           required:
             - ip
             - dns_label
             - user_id
-    Peer:
-      allOf:
-        - $ref: '#/components/schemas/PeerBase'
-        - type: object
-          properties:
-            accessible_peers:
-              description: List of accessible peers
-              type: array
-              items:
-                $ref: '#/components/schemas/AccessiblePeer'
-          required:
-            - accessible_peers
+            - os
+            - country_code
+            - city_name
+            - geoname_id
+            - connected
+            - last_seen
     PeerBatch:
       allOf:
-        - $ref: '#/components/schemas/PeerBase'
+        - $ref: '#/components/schemas/Peer'
         - type: object
           properties:
             accessible_peers_count:
@@ -355,17 +450,13 @@ components:
               example: 5
           required:
             - accessible_peers_count
-    SetupKey:
+    SetupKeyBase:
       type: object
       properties:
         id:
           description: Setup Key ID
           type: string
           example: 2531583362
-        key:
-          description: Setup Key value
-          type: string
-          example: A616097E-FCF0-48FA-9354-CA4A61142761
         name:
           description: Setup key name identifier
           type: string
@@ -374,7 +465,7 @@ components:
           description: Setup Key expiration date
           type: string
           format: date-time
-          example: 2023-06-01T14:47:22.291057Z
+          example: "2023-06-01T14:47:22.291057Z"
         type:
           description: Setup key type, one-off for single time usage and reusable
           type: string
@@ -395,7 +486,7 @@ components:
           description: Setup key last usage date
           type: string
           format: date-time
-          example: 2023-05-05T09:00:35.477782Z
+          example: "2023-05-05T09:00:35.477782Z"
         state:
           description: Setup key status, "valid", "overused","expired" or "revoked"
           type: string
@@ -405,18 +496,22 @@ components:
           type: array
           items:
             type: string
-            example: "devs"
+            example: "ch8i4ug6lnn4g9hqv7m0"
         updated_at:
           description: Setup key last update date
           type: string
           format: date-time
-          example: 2023-05-05T09:00:35.477782Z
+          example: "2023-05-05T09:00:35.477782Z"
         usage_limit:
           description: A number of times this key can be used. The value of 0 indicates the unlimited usage.
           type: integer
           example: 0
         ephemeral:
           description: Indicate that the peer will be ephemeral or not
+          type: boolean
+          example: true
+        allow_extra_dns_labels:
+          description: Allow extra DNS labels to be added to the peer
           type: boolean
           example: true
       required:
@@ -434,7 +529,46 @@ components:
         - updated_at
         - usage_limit
         - ephemeral
+        - allow_extra_dns_labels
+    SetupKeyClear:
+      allOf:
+        - $ref: '#/components/schemas/SetupKeyBase'
+        - type: object
+          properties:
+            key:
+              description: Setup Key as plain text
+              type: string
+              example: A616097E-FCF0-48FA-9354-CA4A61142761
+          required:
+            - key
+    SetupKey:
+      allOf:
+        - $ref: '#/components/schemas/SetupKeyBase'
+        - type: object
+          properties:
+            key:
+              description: Setup Key as secret
+              type: string
+              example: A6160****
+          required:
+            - key
     SetupKeyRequest:
+      type: object
+      properties:
+        revoked:
+          description: Setup key revocation status
+          type: boolean
+          example: false
+        auto_groups:
+          description: List of group IDs to auto-assign to peers registered with this key
+          type: array
+          items:
+            type: string
+            example: "ch8i4ug6lnn4g9hqv7m0"
+      required:
+        - revoked
+        - auto_groups
+    CreateSetupKeyRequest:
       type: object
       properties:
         name:
@@ -451,16 +585,12 @@ components:
           minimum: 86400
           maximum: 31536000
           example: 86400
-        revoked:
-          description: Setup key revocation status
-          type: boolean
-          example: false
         auto_groups:
           description: List of group IDs to auto-assign to peers registered with this key
           type: array
           items:
             type: string
-            example: "devs"
+            example: "ch8i4ug6lnn4g9hqv7m0"
         usage_limit:
           description: A number of times this key can be used. The value of 0 indicates the unlimited usage.
           type: integer
@@ -469,11 +599,14 @@ components:
           description: Indicate that the peer will be ephemeral or not
           type: boolean
           example: true
+        allow_extra_dns_labels:
+          description: Allow extra DNS labels to be added to the peer
+          type: boolean
+          example: true
       required:
         - name
         - type
         - expires_in
-        - revoked
         - auto_groups
         - usage_limit
     PersonalAccessToken:
@@ -491,7 +624,7 @@ components:
           description: Date the token expires
           type: string
           format: date-time
-          example: 2023-05-05T14:38:28.977616Z
+          example: "2023-05-05T14:38:28.977616Z"
         created_by:
           description: User ID of the user who created the token
           type: string
@@ -500,12 +633,12 @@ components:
           description: Date the token was created
           type: string
           format: date-time
-          example: 2023-05-02T14:48:20.465209Z
+          example: "2023-05-02T14:48:20.465209Z"
         last_used:
           description: Date the token was last used
           type: string
           format: date-time
-          example: 2023-05-04T12:45:25.9723616Z
+          example: "2023-05-04T12:45:25.9723616Z"
       required:
         - id
         - name
@@ -555,14 +688,20 @@ components:
           description: Count of peers associated to the group
           type: integer
           example: 2
+        resources_count:
+          description: Count of resources associated to the group
+          type: integer
+          example: 5
         issued:
-          description: How group was issued by API or from JWT token
+          description: How the group was issued (api, integration, jwt)
           type: string
+          enum: ["api", "integration", "jwt"]
           example: api
       required:
         - id
         - name
         - peers_count
+        - resources_count
     GroupRequest:
       type: object
       properties:
@@ -576,6 +715,10 @@ components:
           items:
             type: string
             example: "ch8i4ug6lnn4g9hqv7m1"
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Resource'
       required:
         - name
     Group:
@@ -588,82 +731,16 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/PeerMinimum'
+            resources:
+              type: array
+              items:
+                $ref: '#/components/schemas/Resource'
           required:
             - peers
-    RuleMinimum:
-      type: object
-      properties:
-        name:
-          description: Rule name identifier
-          type: string
-          example: Default
-        description:
-          description: Rule friendly description
-          type: string
-          example: This is a default rule that allows connections between all the resources
-        disabled:
-          description: Rules status
-          type: boolean
-          example: false
-        flow:
-          description: Rule flow, currently, only "bidirect" for bi-directional traffic is accepted
-          type: string
-          example: bidirect
-      required:
-        - name
-        - description
-        - disabled
-        - flow
-    RuleRequest:
-      allOf:
-        - $ref: '#/components/schemas/RuleMinimum'
-        - type: object
-          properties:
-            sources:
-              type: array
-              description: List of source groups
-              items:
-                type: string
-                example: "ch8i4ug6lnn4g9hqv7m1"
-            destinations:
-              type: array
-              description: List of destination groups
-              items:
-                type: string
-                example: "ch8i4ug6lnn4g9hqv7m0"
-    Rule:
-      allOf:
-        - type: object
-          properties:
-            id:
-              description: Rule ID
-              type: string
-              example: ch8i4ug6lnn4g9hqv7mg
-          required:
-            - id
-        - $ref: '#/components/schemas/RuleMinimum'
-        - type: object
-          properties:
-            sources:
-              description: Rule source groups
-              type: array
-              items:
-                $ref: '#/components/schemas/GroupMinimum'
-            destinations:
-              description: Rule destination groups
-              type: array
-              items:
-                $ref: '#/components/schemas/GroupMinimum'
-          required:
-            - sources
-            - destinations
+            - resources
     PolicyRuleMinimum:
       type: object
       properties:
-        id:
-          description: Policy rule ID
-          type: string
-          example: ch8i4ug6lnn4g9hqv7mg
         name:
           description: Policy rule name identifier
           type: string
@@ -691,62 +768,118 @@ components:
           enum: ["all", "tcp", "udp", "icmp"]
           example: "tcp"
         ports:
-          description: Policy rule affected ports or it ranges list
+          description: Policy rule affected ports
           type: array
           items:
             type: string
             example: "80"
+        port_ranges:
+          description: Policy rule affected ports ranges list
+          type: array
+          items:
+            $ref: '#/components/schemas/RulePortRange'
       required:
         - name
         - enabled
         - bidirectional
         - protocol
         - action
+
+    RulePortRange:
+      description: Policy rule affected ports range
+      type: object
+      properties:
+        start:
+          description: The starting port of the range
+          type: integer
+          example: 80
+        end:
+          description: The ending port of the range
+          type: integer
+          example: 320
+      required:
+        - start
+        - end
+
     PolicyRuleUpdate:
       allOf:
         - $ref: '#/components/schemas/PolicyRuleMinimum'
         - type: object
           properties:
+            id:
+              description: Policy rule ID
+              type: string
+              example: ch8i4ug6lnn4g9hqv7mg
             sources:
-              description: Policy rule source groups
+              description: Policy rule source group IDs
               type: array
               items:
                 type: string
                 example: "ch8i4ug6lnn4g9hqv797"
+            sourceResource:
+              description: Policy rule source resource that the rule is applied to
+              $ref: '#/components/schemas/Resource'
             destinations:
-              description: Policy rule destination groups
+              description: Policy rule destination group IDs
               type: array
               items:
                 type: string
                 example: "ch8i4ug6lnn4g9h7v7m0"
-          required:
-            - sources
-            - destinations
-    PolicyRule:
+            destinationResource:
+              description: Policy rule destination resource that the rule is applied to
+              $ref: '#/components/schemas/Resource'
+
+    PolicyRuleCreate:
       allOf:
         - $ref: '#/components/schemas/PolicyRuleMinimum'
         - type: object
           properties:
             sources:
-              description: Policy rule source groups
+              description: Policy rule source group IDs
               type: array
               items:
-                $ref: '#/components/schemas/GroupMinimum'
+                type: string
+                example: "ch8i4ug6lnn4g9hqv797"
+            sourceResource:
+              description: Policy rule source resource that the rule is applied to
+              $ref: '#/components/schemas/Resource'
             destinations:
-              description: Policy rule destination groups
+              description: Policy rule destination group IDs
+              type: array
+              items:
+                type: string
+                example: "ch8i4ug6lnn4g9h7v7m0"
+            destinationResource:
+              description: Policy rule destination resource that the rule is applied to
+              $ref: '#/components/schemas/Resource'
+    PolicyRule:
+      allOf:
+        - $ref: '#/components/schemas/PolicyRuleMinimum'
+        - type: object
+          properties:
+            id:
+              description: Policy rule ID
+              type: string
+              example: ch8i4ug6lnn4g9hqv7mg
+            sources:
+              description: Policy rule source group IDs
               type: array
               items:
                 $ref: '#/components/schemas/GroupMinimum'
-          required:
-            - sources
-            - destinations
+            sourceResource:
+                description: Policy rule source resource that the rule is applied to
+                $ref: '#/components/schemas/Resource'
+            destinations:
+              description: Policy rule destination group IDs
+              type: array
+              items:
+                $ref: '#/components/schemas/GroupMinimum'
+            destinationResource:
+              description: Policy rule destination resource that the rule is applied to
+              $ref: '#/components/schemas/Resource'
     PolicyMinimum:
       type: object
       properties:
-        id:
-          description: Policy ID
-          type: string
-          example: ch8i4ug6lnn4g9hqv7mg
         name:
           description: Policy name identifier
           type: string
@@ -759,20 +892,38 @@ components:
           description: Policy status
           type: boolean
           example: true
-        query:
-          description: Policy Rego query
-          type: string
-          example: "package netbird\\n\\nall[rule] {\\n is_peer_in_any_group([\\\"ch8i4ug6lnn4g9hqv7m0\\\",\\\"ch8i4ug6lnn4g9hqv7m0\\\"])\\n rule := {\\n rules_from_group(\\\"ch8i4ug6lnn4g9hqv7m0\\\", \\\"dst\\\", \\\"accept\\\", \\\"\\\"),\\n rules_from_group(\\\"ch8i4ug6lnn4g9hqv7m0\\\", \\\"src\\\", \\\"accept\\\", \\\"\\\"),\\n }[_][_]\\n}\\n"
       required:
         - name
-        - description
         - enabled
-        - query
     PolicyUpdate:
       allOf:
         - $ref: '#/components/schemas/PolicyMinimum'
         - type: object
           properties:
+            source_posture_checks:
+              description: Posture checks ID's applied to policy source groups
+              type: array
+              items:
+                type: string
+                example: "chacdk86lnnboviihd70"
+            rules:
+              description: Policy rule object for policy UI editor
+              type: array
+              items:
+                $ref: '#/components/schemas/PolicyRuleUpdate'
+          required:
+            - rules
+    PolicyCreate:
+      allOf:
+        - $ref: '#/components/schemas/PolicyMinimum'
+        - type: object
+          properties:
+            source_posture_checks:
+              description: Posture checks ID's applied to policy source groups
+              type: array
+              items:
+                type: string
+                example: "chacdk86lnnboviihd70"
             rules:
               description: Policy rule object for policy UI editor
               type: array
@@ -785,6 +936,16 @@ components:
         - $ref: '#/components/schemas/PolicyMinimum'
         - type: object
           properties:
+            id:
+              description: Policy ID
+              type: string
+              example: ch8i4ug6lnn4g9hqv7mg
+            source_posture_checks:
+              description: Posture checks ID's applied to policy source groups
+              type: array
+              items:
+                type: string
+                example: "chacdk86lnnboviihd70"
             rules:
               description: Policy rule object for policy UI editor
               type: array
@@ -792,6 +953,218 @@ components:
                 $ref: '#/components/schemas/PolicyRule'
           required:
             - rules
+            - source_posture_checks
+    PostureCheck:
+      type: object
+      properties:
+        id:
+          description: Posture check ID
+          type: string
+          example: ch8i4ug6lnn4g9hqv7mg
+        name:
+          description: Posture check unique name identifier
+          type: string
+          example: Default
+        description:
+          description: Posture check friendly description
+          type: string
+          example: This checks if the peer is running required NetBird's version
+        checks:
+          $ref: '#/components/schemas/Checks'
+      required:
+        - id
+        - name
+        - checks
+    Checks:
+      description: List of objects that perform the actual checks
+      type: object
+      properties:
+        nb_version_check:
+          $ref: '#/components/schemas/NBVersionCheck'
+        os_version_check:
+          $ref: '#/components/schemas/OSVersionCheck'
+        geo_location_check:
+          $ref: '#/components/schemas/GeoLocationCheck'
+        peer_network_range_check:
+          $ref: '#/components/schemas/PeerNetworkRangeCheck'
+        process_check:
+          $ref: '#/components/schemas/ProcessCheck'
+    NBVersionCheck:
+      description: Posture check for the version of NetBird
+      type: object
+      $ref: '#/components/schemas/MinVersionCheck'
+    OSVersionCheck:
+      description: Posture check for the version of operating system
+      type: object
+      properties:
+        android:
+          description: Minimum version of Android
+          $ref: '#/components/schemas/MinVersionCheck'
+        darwin:
+          $ref: '#/components/schemas/MinVersionCheck'
+        ios:
+          description: Minimum version of iOS
+          $ref: '#/components/schemas/MinVersionCheck'
+        linux:
+          description: Minimum Linux kernel version
+          $ref: '#/components/schemas/MinKernelVersionCheck'
+        windows:
+          description: Minimum Windows kernel build version
+          $ref: '#/components/schemas/MinKernelVersionCheck'
+      example:
+        android:
+          min_version: "13"
+        ios:
+          min_version: "17.3.1"
+        darwin:
+          min_version: "14.2.1"
+        linux:
+          min_kernel_version: "5.3.3"
+        windows:
+          min_kernel_version: "10.0.1234"
+    MinVersionCheck:
+      description: Posture check for the version of operating system
+      type: object
+      properties:
+        min_version:
+          description: Minimum acceptable version
+          type: string
+          example: "14.3"
+      required:
+        - min_version
+    MinKernelVersionCheck:
+      description: Posture check with the kernel version
+      type: object
+      properties:
+        min_kernel_version:
+          description: Minimum acceptable version
+          type: string
+          example: "6.6.12"
+      required:
+        - min_kernel_version
+    GeoLocationCheck:
+      description: Posture check for geo location
+      type: object
+      properties:
+        locations:
+          description: List of geo locations to which the policy applies
+          type: array
+          items:
+            $ref: '#/components/schemas/Location'
+        action:
+          description: Action to take upon policy match
+          type: string
+          enum: [ "allow", "deny" ]
+          example: "allow"
+      required:
+        - locations
+        - action
+    PeerNetworkRangeCheck:
+      description: Posture check for allow or deny access based on peer local network addresses
+      type: object
+      properties:
+        ranges:
+          description: List of peer network ranges in CIDR notation
+          type: array
+          items:
+            type: string
+          example: ["192.168.1.0/24", "10.0.0.0/8", "2001:db8:1234:1a00::/56"]
+        action:
+          description: Action to take upon policy match
+          type: string
+          enum: [ "allow", "deny" ]
+          example: "allow"
+      required:
+        - ranges
+        - action
+    ProcessCheck:
+      description: Posture Check for binaries exist and are running in the peer’s system
+      type: object
+      properties:
+        processes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Process'
+      required:
+        - processes
+    Process:
+      description: Describes the operational activity within a peer's system.
+      type: object
+      properties:
+        linux_path:
+          description: Path to the process executable file in a Linux operating system
+          type: string
+          example: "/usr/local/bin/netbird"
+        mac_path:
+          description: Path to the process executable file in a Mac operating system
+          type: string
+          example: "/Applications/NetBird.app/Contents/MacOS/netbird"
+        windows_path:
+          description: Path to the process executable file in a Windows operating system
+          type: string
+          example: "C:\ProgramData\NetBird\netbird.exe"
+    Location:
+      description: Describe geographical location information
+      type: object
+      properties:
+        country_code:
+          $ref: '#/components/schemas/CountryCode'
+        city_name:
+          $ref: '#/components/schemas/CityName'
+      required:
+        - country_code
+    CountryCode:
+      description: 2-letter ISO 3166-1 alpha-2 code that represents the country
+      type: string
+      example: "DE"
+    CityName:
+      description: Commonly used English name of the city
+      type: string
+      example: "Berlin"
+    Country:
+      description: Describe country geographical location information
+      type: object
+      properties:
+        country_name:
+          description: Commonly used English name of the country
+          type: string
+          example: "Germany"
+        country_code:
+          $ref: '#/components/schemas/CountryCode'
+      required:
+        - country_name
+        - country_code
+    City:
+      description: Describe city geographical location information
+      type: object
+      properties:
+        geoname_id:
+          description: Integer ID of the record in GeoNames database
+          type: integer
+          example: 2950158
+        city_name:
+          description: Commonly used English name of the city
+          type: string
+          example: "Berlin"
+      required:
+        - geoname_id
+        - city_name
+    PostureCheckUpdate:
+      type: object
+      properties:
+        name:
+          description: Posture check name identifier
+          type: string
+          example: Default
+        description:
+          description: Posture check friendly description
+          type: string
+          example: This checks if the peer is running required NetBird's version
+        checks:
+          $ref: '#/components/schemas/Checks'
+      required:
+        - name
+        - description
     RouteRequest:
       type: object
       properties:
@@ -820,9 +1193,17 @@ components:
             type: string
             example: chacbco6lnnbn6cg5s91
         network:
-          description: Network range in CIDR format
+          description: Network range in CIDR format, Conflicts with domains
           type: string
           example: 10.64.0.0/24
+        domains:
+          description: Domain list to be dynamically resolved. Max of 32 domains can be added per route configuration. Conflicts with network
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+            example: "example.com"
         metric:
           description: Route metric number. Lowest number has higher priority
           type: integer
@@ -834,11 +1215,21 @@ components:
           type: boolean
           example: true
         groups:
-          description: Route group tag groups
+          description: Group IDs containing routing peers
           type: array
           items:
             type: string
             example: "chacdk86lnnboviihd70"
+        keep_route:
+          description: Indicate if the route should be kept after a domain doesn't resolve that IP anymore
+          type: boolean
+          example: true
+        access_control_groups:
+          description: Access control group identifier associated with route.
+          type: array
+          items:
+            type: string
+            example: "chacbco6lnnbn6cg5s91"
       required:
         - id
         - description
@@ -847,10 +1238,13 @@ components:
         # Only one property has to be set
         #- peer
         #- peer_groups
-        - network
+        # Only one property has to be set
+        #- network
+        #- domains
         - metric
         - masquerade
         - groups
+        - keep_route
     Route:
       allOf:
         - type: object
@@ -860,13 +1254,188 @@ components:
               type: string
               example: chacdk86lnnboviihd7g
             network_type:
-              description: Network type indicating if it is IPv4 or IPv6
+              description: Network type indicating if it is a domain route or a IPv4/IPv6 route
               type: string
               example: IPv4
           required:
             - id
             - network_type
         - $ref: '#/components/schemas/RouteRequest'
+    Resource:
+      type: object
+      properties:
+        id:
+          description: ID of the resource
+          type: string
+          example: chacdk86lnnboviihd7g
+        type:
+          description: Type of the resource
+          $ref: '#/components/schemas/ResourceType'
+      required:
+        - id
+        - type
+    ResourceType:
+      allOf:
+        - $ref: '#/components/schemas/NetworkResourceType'
+        - type: string
+          example: host
+    NetworkRequest:
+      type: object
+      properties:
+        name:
+          description: Network name
+          type: string
+          example: Remote Network 1
+        description:
+          description: Network description
+          type: string
+          example: A remote network that needs to be accessed
+      required:
+        - name
+    Network:
+      allOf:
+        - type: object
+          properties:
+            id:
+              description: Network ID
+              type: string
+              example: chacdk86lnnboviihd7g
+            routers:
+              description: List of router IDs associated with the network
+              type: array
+              items:
+                type: string
+                example: ch8i4ug6lnn4g9hqv7m0
+            routing_peers_count:
+              description: Count of routing peers associated with the network
+              type: integer
+              example: 2
+            resources:
+              description: List of network resource IDs associated with the network
+              type: array
+              items:
+                type: string
+                example: ch8i4ug6lnn4g9hqv7m1
+            policies:
+              description: List of policy IDs associated with the network
+              type: array
+              items:
+                type: string
+                example: ch8i4ug6lnn4g9hqv7m2
+          required:
+            - id
+            - routers
+            - resources
+            - routing_peers_count
+            - policies
+        - $ref: '#/components/schemas/NetworkRequest'
+    NetworkResourceMinimum:
+      type: object
+      properties:
+        name:
+          description: Network resource name
+          type: string
+          example: Remote Resource 1
+        description:
+          description: Network resource description
+          type: string
+          example: A remote resource inside network 1
+        address:
+          description: Network resource address (either a direct host like 1.1.1.1 or 1.1.1.1/32, or a subnet like 192.168.178.0/24, or domains like example.com and *.example.com)
+          type: string
+          example: "1.1.1.1"
+        enabled:
+          description: Network resource status
+          type: boolean
+          example: true
+      required:
+        - name
+        - address
+        - enabled
+    NetworkResourceRequest:
+      allOf:
+        - $ref: '#/components/schemas/NetworkResourceMinimum'
+        - type: object
+          properties:
+            groups:
+              description: Group IDs containing the resource
+              type: array
+              items:
+                type: string
+                example: "chacdk86lnnboviihd70"
+          required:
+            - groups
+            - address
+    NetworkResource:
+      allOf:
+        - type: object
+          properties:
+            id:
+              description: Network Resource ID
+              type: string
+              example: chacdk86lnnboviihd7g
+            type:
+              $ref: '#/components/schemas/NetworkResourceType'
+            groups:
+              description: Groups that the resource belongs to
+              type: array
+              items:
+                $ref: '#/components/schemas/GroupMinimum'
+          required:
+            - id
+            - type
+            - groups
+        - $ref: '#/components/schemas/NetworkResourceMinimum'
+    NetworkResourceType:
+      description: Network resource type based of the address
+      type: string
+      enum: [ "host", "subnet", "domain" ]
+      example: host
+    NetworkRouterRequest:
+      type: object
+      properties:
+        peer:
+          description: Peer Identifier associated with route. This property can not be set together with `peer_groups`
+          type: string
+          example: chacbco6lnnbn6cg5s91
+        peer_groups:
+          description: Peers Group Identifier associated with route. This property can not be set together with `peer`
+          type: array
+          items:
+            type: string
+            example: chacbco6lnnbn6cg5s91
+        metric:
+          description: Route metric number. Lowest number has higher priority
+          type: integer
+          maximum: 9999
+          minimum: 1
+          example: 9999
+        masquerade:
+          description: Indicate if peer should masquerade traffic to this route's prefix
+          type: boolean
+          example: true
+        enabled:
+          description: Network router status
+          type: boolean
+          example: true
+      required:
+        # Only one property has to be set
+        #- peer
+        #- peer_groups
+        - metric
+        - masquerade
+        - enabled
+    NetworkRouter:
+      allOf:
+        - type: object
+          properties:
+            id:
+              description: Network Router Id
+              type: string
+              example: chacdk86lnnboviihd7g
+          required:
+            - id
+        - $ref: '#/components/schemas/NetworkRouterRequest'
     Nameserver:
       type: object
       properties:
@@ -891,19 +1460,19 @@ components:
       type: object
       properties:
         name:
-          description: Nameserver group name
+          description: Name of nameserver group name
           type: string
           maxLength: 40
           minLength: 1
           example: Google DNS
         description:
-          description: Nameserver group  description
+          description: Description of the nameserver group
           type: string
           example: Google DNS servers
         nameservers:
-          description: Nameserver group
+          description: Nameserver list
           minLength: 1
-          maxLength: 2
+          maxLength: 3
           type: array
           items:
             $ref: '#/components/schemas/Nameserver'
@@ -912,17 +1481,17 @@ components:
           type: boolean
           example: true
         groups:
-          description: Nameserver group tag groups
+          description: Distribution group IDs that defines group of peers that will use this nameserver group
           type: array
           items:
             type: string
             example: ch8i4ug6lnn4g9hqv7m0
         primary:
-          description: Nameserver group primary status
+          description: Defines if a nameserver group is primary that resolves all domains. It should be true only if domains list is empty.
           type: boolean
           example: true
         domains:
-          description: Nameserver group match domain list
+          description: Match domain list. It should be empty only if primary is true.
           type: array
           items:
             type: string
@@ -930,7 +1499,7 @@ components:
             maxLength: 255
             example: "example.com"
         search_domains_enabled:
-          description: Nameserver group search domain status for match domains. It should be true only if domains list is not empty.
+          description: Search domain status for match domains. It should be true only if domains list is not empty.
           type: boolean
           example: true
       required:
@@ -975,7 +1544,7 @@ components:
           description: The date and time when the event occurred
           type: string
           format: date-time
-          example: 2023-05-05T10:04:37.473542Z
+          example: "2023-05-05T10:04:37.473542Z"
         activity:
           description: The activity that occurred during the event
           type: string
@@ -1093,7 +1662,7 @@ paths:
   /api/accounts/{accountId}:
     delete:
       summary: Delete an Account
-      description: Deletes an account and all its resources. Only administrators and account owners can delete accounts.
+      description: Deletes an account and all its resources. Only account owners can delete accounts.
       tags: [ Accounts ]
       security:
         - BearerAuth: [ ]
@@ -1551,6 +2120,38 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
+  /api/peers/{peerId}/accessible-peers:
+    get:
+      summary: List accessible Peers
+      description: Returns a list of peers that the specified peer can connect to within the network.
+      tags: [ Peers ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: peerId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a peer
+      responses:
+        '200':
+          description: A JSON Array of Accessible Peers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AccessiblePeer'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
   /api/setup-keys:
     get:
       summary: List all Setup Keys
@@ -1588,14 +2189,14 @@ paths:
         content:
           'application/json':
             schema:
-              $ref: '#/components/schemas/SetupKeyRequest'
+              $ref: '#/components/schemas/CreateSetupKeyRequest'
       responses:
         '200':
           description: A Setup Keys Object
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SetupKey'
+                $ref: '#/components/schemas/SetupKeyClear'
         '400':
           "$ref": "#/components/responses/bad_request"
         '401':
@@ -1661,6 +2262,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SetupKey'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    delete:
+      summary: Delete a Setup Key
+      description: Delete a Setup Key
+      tags: [ Setup Keys ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: keyId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a setup key
+      responses:
+        '200':
+          description: Delete status code
+          content: { }
         '400':
           "$ref": "#/components/responses/bad_request"
         '401':
@@ -1813,142 +2440,6 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
-  /api/rules:
-    get:
-      summary: List all Rules
-      description: Returns a list of all rules
-      tags: [ Rules ]
-      security:
-        - BearerAuth: [ ]
-        - TokenAuth: [ ]
-      responses:
-        '200':
-          description: A JSON Array of Rules
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Rule'
-        '400':
-          "$ref": "#/components/responses/bad_request"
-        '401':
-          "$ref": "#/components/responses/requires_authentication"
-        '403':
-          "$ref": "#/components/responses/forbidden"
-        '500':
-          "$ref": "#/components/responses/internal_error"
-    post:
-      summary: Create a Rule
-      description: Creates a rule
-      tags: [ Rules ]
-      security:
-        - BearerAuth: [ ]
-        - TokenAuth: [ ]
-      requestBody:
-        description: New Rule request
-        content:
-          'application/json':
-            schema:
-              $ref: '#/components/schemas/RuleRequest'
-      responses:
-        '200':
-          description: A Rule Object
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Rule'
-  /api/rules/{ruleId}:
-    get:
-      summary: Retrieve a Rule
-      description: Get information about a rules
-      tags: [ Rules ]
-      security:
-        - BearerAuth: [ ]
-        - TokenAuth: [ ]
-      parameters:
-        - in: path
-          name: ruleId
-          required: true
-          schema:
-            type: string
-          description: The unique identifier of a rule
-      responses:
-        '200':
-          description: A Rule object
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Rule'
-        '400':
-          "$ref": "#/components/responses/bad_request"
-        '401':
-          "$ref": "#/components/responses/requires_authentication"
-        '403':
-          "$ref": "#/components/responses/forbidden"
-        '500':
-          "$ref": "#/components/responses/internal_error"
-    put:
-      summary: Update a Rule
-      description: Update/Replace a rule
-      tags: [ Rules ]
-      security:
-        - BearerAuth: [ ]
-        - TokenAuth: [ ]
-      parameters:
-        - in: path
-          name: ruleId
-          required: true
-          schema:
-            type: string
-          description: The unique identifier of a rule
-      requestBody:
-        description: Update Rule request
-        content:
-          'application/json':
-            schema:
-              $ref: '#/components/schemas/RuleRequest'
-      responses:
-        '200':
-          description: A Rule object
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Rule'
-        '400':
-          "$ref": "#/components/responses/bad_request"
-        '401':
-          "$ref": "#/components/responses/requires_authentication"
-        '403':
-          "$ref": "#/components/responses/forbidden"
-        '500':
-          "$ref": "#/components/responses/internal_error"
-    delete:
-      summary: Delete a Rule
-      description: Delete a rule
-      tags: [ Rules ]
-      security:
-        - BearerAuth: [ ]
-        - TokenAuth: [ ]
-      parameters:
-        - in: path
-          name: ruleId
-          required: true
-          schema:
-            type: string
-          description: The unique identifier of a rule
-      responses:
-        '200':
-          description: Delete status code
-          content: { }
-        '400':
-          "$ref": "#/components/responses/bad_request"
-        '401':
-          "$ref": "#/components/responses/requires_authentication"
-        '403':
-          "$ref": "#/components/responses/forbidden"
-        '500':
-          "$ref": "#/components/responses/internal_error"
   /api/policies:
     get:
       summary: List all Policies
@@ -2043,7 +2534,7 @@ paths:
         content:
           'application/json':
             schema:
-              $ref: '#/components/schemas/PolicyUpdate'
+              $ref: '#/components/schemas/PolicyCreate'
       responses:
         '200':
           description: A Policy object
@@ -2138,7 +2629,6 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
-
   /api/routes/{routeId}:
     get:
       summary: Retrieve a Route
@@ -2230,6 +2720,502 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
+  /api/networks:
+    get:
+      summary: List all Networks
+      description: Returns a list of all networks
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      responses:
+        '200':
+          description: A JSON Array of Networks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Network'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    post:
+      summary: Create a Network
+      description: Creates a Network
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      requestBody:
+        description: New Network request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/NetworkRequest'
+      responses:
+        '200':
+          description: A Network Object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/networks/{networkId}:
+    get:
+      summary: Retrieve a Network
+      description: Get information about a Network
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      responses:
+        '200':
+          description: A Network object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    put:
+      summary: Update a Network
+      description: Update/Replace a Network
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      requestBody:
+        description: Update Network request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkRequest'
+      responses:
+        '200':
+          description: A Network object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Network'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    delete:
+      summary: Delete a Network
+      description: Delete a network
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      responses:
+        '200':
+          description: Delete status code
+          content: { }
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/networks/{networkId}/resources:
+    get:
+      summary: List all Network Resources
+      description: Returns a list of all resources in a network
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      responses:
+        '200':
+          description: A JSON Array of Resources
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NetworkResource'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    post:
+      summary: Create a Network Resource
+      description: Creates a Network Resource
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      requestBody:
+        description: New Network Resource request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/NetworkResourceRequest'
+      responses:
+        '200':
+          description: A Network Resource Object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkResource'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/networks/{networkId}/resources/{resourceId}:
+    get:
+      summary: Retrieve a Network Resource
+      description: Get information about a Network Resource
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+        - in: path
+          name: resourceId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network resource
+      responses:
+        '200':
+          description: A Network Resource object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkResource'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    put:
+      summary: Update a Network Resource
+      description: Update a Network Resource
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+        - in: path
+          name: resourceId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a resource
+      requestBody:
+        description: Update Network Resource request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/NetworkResourceRequest'
+      responses:
+        '200':
+          description: A Network Resource object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkResource'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    delete:
+      summary: Delete a Network Resource
+      description: Delete a network resource
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+            description: The unique identifier of a network
+        - in: path
+          name: resourceId
+          required: true
+          schema:
+            type: string
+            description: The unique identifier of a network resource
+      responses:
+        '200':
+          description: Delete status code
+          content: { }
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/networks/{networkId}/routers:
+    get:
+      summary: List all Network Routers
+      description: Returns a list of all routers in a network
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      responses:
+        '200':
+          description: A JSON Array of Routers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NetworkRouter'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    post:
+      summary: Create a Network Router
+      description: Creates a Network Router
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+      requestBody:
+        description: New Network Router request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/NetworkRouterRequest'
+      responses:
+        '200':
+          description: A Router Object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkRouter'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/networks/{networkId}/routers/{routerId}:
+    get:
+      summary: Retrieve a Network Router
+      description: Get information about a Network Router
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+        - in: path
+          name: routerId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a router
+      responses:
+        '200':
+          description: A Router object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkRouter'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    put:
+      summary: Update a Network Router
+      description: Update a Network Router
+      tags: [ Networks ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a network
+        - in: path
+          name: routerId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a router
+      requestBody:
+        description: Update Network Router request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/NetworkRouterRequest'
+      responses:
+        '200':
+          description: A Router object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkRouter'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    delete:
+      summary: Delete a Network Router
+      description: Delete a network router
+      tags: [ Networks ]
+      security:
+          - BearerAuth: [ ]
+          - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: networkId
+          required: true
+          schema:
+            type: string
+            description: The unique identifier of a network
+        - in: path
+          name: routerId
+          required: true
+          schema:
+            type: string
+            description: The unique identifier of a router
+      responses:
+        '200':
+          description: Delete status code
+          content: { }
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
   /api/dns/nameservers:
     get:
       summary: List all Nameserver Groups
@@ -2283,7 +3269,6 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
-
   /api/dns/nameservers/{nsgroupId}:
     get:
       summary: Retrieve a Nameserver Group
@@ -2375,7 +3360,6 @@ paths:
           "$ref": "#/components/responses/forbidden"
         '500':
           "$ref": "#/components/responses/internal_error"
-
   /api/dns/settings:
     get:
       summary: Retrieve DNS settings
@@ -2445,6 +3429,197 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Event'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/posture-checks:
+    get:
+      summary: List all Posture Checks
+      description: Returns a list of all posture checks
+      tags: [ "Posture Checks" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      responses:
+        '200':
+          description: A JSON Array of posture checks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PostureCheck'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    post:
+      summary: Create a Posture Check
+      description: Creates a posture check
+      tags: [ "Posture Checks" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      requestBody:
+        description: New posture check request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/PostureCheckUpdate'
+      responses:
+        '200':
+          description: A posture check Object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostureCheck'
+  /api/posture-checks/{postureCheckId}:
+    get:
+      summary: Retrieve a Posture Check
+      description: Get information about a posture check
+      tags: [ "Posture Checks" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: postureCheckId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a posture check
+      responses:
+        '200':
+          description: A posture check object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostureCheck'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    put:
+      summary: Update a Posture Check
+      description: Update/Replace a posture check
+      tags: [ "Posture Checks" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: postureCheckId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a posture check
+      requestBody:
+        description: Update Rule request
+        content:
+          'application/json':
+            schema:
+              $ref: '#/components/schemas/PostureCheckUpdate'
+      responses:
+        '200':
+          description: A posture check object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostureCheck'
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+    delete:
+      summary: Delete a Posture Check
+      description: Delete a posture check
+      tags: [ "Posture Checks" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: postureCheckId
+          required: true
+          schema:
+            type: string
+          description: The unique identifier of a posture check
+      responses:
+        '200':
+          description: Delete status code
+          content: { }
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/locations/countries:
+    get:
+      summary: List all country codes
+      description: Get list of all country in 2-letter ISO 3166-1 alpha-2 codes
+      tags: [ "Geo Locations" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      responses:
+        '200':
+          description: List of country codes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                  example: "DE"
+        '400':
+          "$ref": "#/components/responses/bad_request"
+        '401':
+          "$ref": "#/components/responses/requires_authentication"
+        '403':
+          "$ref": "#/components/responses/forbidden"
+        '500':
+          "$ref": "#/components/responses/internal_error"
+  /api/locations/countries/{country}/cities:
+    get:
+      summary: List all city names by country
+      description: Get a list of all English city names for a given country code
+      tags: [ "Geo Locations" ]
+      security:
+        - BearerAuth: [ ]
+        - TokenAuth: [ ]
+      parameters:
+        - in: path
+          name: country
+          required: true
+          schema:
+            $ref: '#/components/schemas/Country'
+      responses:
+        '200':
+          description: List of city names
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/City'
         '400':
           "$ref": "#/components/responses/bad_request"
         '401':

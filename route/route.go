@@ -1,8 +1,14 @@
 package route
 
 import (
+	"fmt"
 	"net/netip"
+	"slices"
+	"strings"
 
+	log "github.com/sirupsen/logrus"
+
+	"github.com/netbirdio/netbird/management/domain"
 	"github.com/netbirdio/netbird/management/server/status"
 )
 
@@ -25,6 +31,8 @@ const (
 	IPv4NetworkString = "IPv4"
 	// IPv6NetworkString IPv6 network type string
 	IPv6NetworkString = "IPv6"
+	// DomainNetworkString domain network type string
+	DomainNetworkString = "Domain"
 )
 
 const (
@@ -34,7 +42,15 @@ const (
 	IPv4Network
 	// IPv6Network IPv6 network type
 	IPv6Network
+	// DomainNetwork domain network type
+	DomainNetwork
 )
+
+type ID string
+
+type NetID string
+
+type HAMap map[HAUniqueID][]*Route
 
 // NetworkType route network type
 type NetworkType int
@@ -46,6 +62,8 @@ func (p NetworkType) String() string {
 		return IPv4NetworkString
 	case IPv6Network:
 		return IPv6NetworkString
+	case DomainNetwork:
+		return DomainNetworkString
 	default:
 		return InvalidNetworkString
 	}
@@ -58,6 +76,8 @@ func ToPrefixType(prefix string) NetworkType {
 		return IPv4Network
 	case IPv6NetworkString:
 		return IPv6Network
+	case DomainNetworkString:
+		return DomainNetwork
 	default:
 		return InvalidNetwork
 	}
@@ -65,59 +85,98 @@ func ToPrefixType(prefix string) NetworkType {
 
 // Route represents a route
 type Route struct {
-	ID string `gorm:"primaryKey"`
+	ID ID `gorm:"primaryKey"`
 	// AccountID is a reference to Account that this object belongs
-	AccountID   string       `gorm:"index"`
-	Network     netip.Prefix `gorm:"serializer:gob"`
-	NetID       string
-	Description string
-	Peer        string
-	PeerGroups  []string `gorm:"serializer:gob"`
-	NetworkType NetworkType
-	Masquerade  bool
-	Metric      int
-	Enabled     bool
-	Groups      []string `gorm:"serializer:json"`
+	AccountID string `gorm:"index"`
+	// Network and Domains are mutually exclusive
+	Network             netip.Prefix `gorm:"serializer:json"`
+	Domains             domain.List  `gorm:"serializer:json"`
+	KeepRoute           bool
+	NetID               NetID
+	Description         string
+	Peer                string
+	PeerID              string   `gorm:"-"`
+	PeerGroups          []string `gorm:"serializer:json"`
+	NetworkType         NetworkType
+	Masquerade          bool
+	Metric              int
+	Enabled             bool
+	Groups              []string `gorm:"serializer:json"`
+	AccessControlGroups []string `gorm:"serializer:json"`
 }
 
 // EventMeta returns activity event meta related to the route
 func (r *Route) EventMeta() map[string]any {
-	return map[string]any{"name": r.NetID, "network_range": r.Network.String(), "peer_id": r.Peer, "peer_groups": r.PeerGroups}
+	return map[string]any{"name": r.NetID, "network_range": r.Network.String(), "domains": r.Domains.SafeString(), "peer_id": r.Peer, "peer_groups": r.PeerGroups}
 }
 
 // Copy copies a route object
 func (r *Route) Copy() *Route {
 	route := &Route{
-		ID:          r.ID,
-		Description: r.Description,
-		NetID:       r.NetID,
-		Network:     r.Network,
-		NetworkType: r.NetworkType,
-		Peer:        r.Peer,
-		PeerGroups:  make([]string, len(r.PeerGroups)),
-		Metric:      r.Metric,
-		Masquerade:  r.Masquerade,
-		Enabled:     r.Enabled,
-		Groups:      make([]string, len(r.Groups)),
+		ID:                  r.ID,
+		Description:         r.Description,
+		NetID:               r.NetID,
+		Network:             r.Network,
+		Domains:             slices.Clone(r.Domains),
+		KeepRoute:           r.KeepRoute,
+		NetworkType:         r.NetworkType,
+		Peer:                r.Peer,
+		PeerID:              r.PeerID,
+		PeerGroups:          slices.Clone(r.PeerGroups),
+		Metric:              r.Metric,
+		Masquerade:          r.Masquerade,
+		Enabled:             r.Enabled,
+		Groups:              slices.Clone(r.Groups),
+		AccessControlGroups: slices.Clone(r.AccessControlGroups),
 	}
-	copy(route.Groups, r.Groups)
-	copy(route.PeerGroups, r.PeerGroups)
 	return route
 }
 
 // IsEqual compares one route with the other
 func (r *Route) IsEqual(other *Route) bool {
+	if r == nil && other == nil {
+		return true
+	} else if r == nil || other == nil {
+		return false
+	}
+
 	return other.ID == r.ID &&
 		other.Description == r.Description &&
 		other.NetID == r.NetID &&
 		other.Network == r.Network &&
+		slices.Equal(r.Domains, other.Domains) &&
+		other.KeepRoute == r.KeepRoute &&
 		other.NetworkType == r.NetworkType &&
 		other.Peer == r.Peer &&
+		other.PeerID == r.PeerID &&
 		other.Metric == r.Metric &&
 		other.Masquerade == r.Masquerade &&
 		other.Enabled == r.Enabled &&
-		compareList(r.Groups, other.Groups) &&
-		compareList(r.PeerGroups, other.PeerGroups)
+		slices.Equal(r.Groups, other.Groups) &&
+		slices.Equal(r.PeerGroups, other.PeerGroups) &&
+		slices.Equal(r.AccessControlGroups, other.AccessControlGroups)
+}
+
+// IsDynamic returns if the route is dynamic, i.e. has domains
+func (r *Route) IsDynamic() bool {
+	return r.NetworkType == DomainNetwork
+}
+
+func (r *Route) GetHAUniqueID() HAUniqueID {
+	if r.IsDynamic() {
+		domains, err := r.Domains.String()
+		if err != nil {
+			log.Errorf("Failed to convert domains to string: %v", err)
+			domains = r.Domains.PunycodeString()
+		}
+		return HAUniqueID(fmt.Sprintf("%s%s%s", r.NetID, haSeparator, domains))
+	}
+	return HAUniqueID(fmt.Sprintf("%s%s%s", r.NetID, haSeparator, r.Network.String()))
+}
+
+// GetResourceID returns the Networks Resource ID from a route ID
+func (r *Route) GetResourceID() string {
+	return strings.Split(string(r.ID), ":")[0]
 }
 
 // ParseNetwork Parses a network prefix string and returns a netip.Prefix object and if is invalid, IPv4 or IPv6
@@ -138,29 +197,4 @@ func ParseNetwork(networkString string) (NetworkType, netip.Prefix, error) {
 	}
 
 	return IPv4Network, masked, nil
-}
-
-func compareList(list, other []string) bool {
-	if len(list) != len(other) {
-		return false
-	}
-	for _, id := range list {
-		match := false
-		for _, otherID := range other {
-			if id == otherID {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return false
-		}
-	}
-
-	return true
-}
-
-// GetHAUniqueID returns a highly available route ID by combining Network ID and Network range address
-func GetHAUniqueID(input *Route) string {
-	return input.NetID + "-" + input.Network.String()
 }

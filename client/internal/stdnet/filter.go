@@ -1,6 +1,7 @@
 package stdnet
 
 import (
+	"runtime"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -19,8 +20,7 @@ func InterfaceFilter(disallowList []string) func(string) bool {
 		}
 
 		for _, s := range disallowList {
-			if strings.HasPrefix(iFace, s) {
-				log.Tracef("ignoring interface %s - it is not allowed", iFace)
+			if strings.HasPrefix(iFace, s) && runtime.GOOS != "ios" {
 				return false
 			}
 		}

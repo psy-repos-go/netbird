@@ -31,6 +31,29 @@ type DaemonServiceClient interface {
 	Down(ctx context.Context, in *DownRequest, opts ...grpc.CallOption) (*DownResponse, error)
 	// GetConfig of the daemon.
 	GetConfig(ctx context.Context, in *GetConfigRequest, opts ...grpc.CallOption) (*GetConfigResponse, error)
+	// List available networks
+	ListNetworks(ctx context.Context, in *ListNetworksRequest, opts ...grpc.CallOption) (*ListNetworksResponse, error)
+	// Select specific routes
+	SelectNetworks(ctx context.Context, in *SelectNetworksRequest, opts ...grpc.CallOption) (*SelectNetworksResponse, error)
+	// Deselect specific routes
+	DeselectNetworks(ctx context.Context, in *SelectNetworksRequest, opts ...grpc.CallOption) (*SelectNetworksResponse, error)
+	// DebugBundle creates a debug bundle
+	DebugBundle(ctx context.Context, in *DebugBundleRequest, opts ...grpc.CallOption) (*DebugBundleResponse, error)
+	// GetLogLevel gets the log level of the daemon
+	GetLogLevel(ctx context.Context, in *GetLogLevelRequest, opts ...grpc.CallOption) (*GetLogLevelResponse, error)
+	// SetLogLevel sets the log level of the daemon
+	SetLogLevel(ctx context.Context, in *SetLogLevelRequest, opts ...grpc.CallOption) (*SetLogLevelResponse, error)
+	// List all states
+	ListStates(ctx context.Context, in *ListStatesRequest, opts ...grpc.CallOption) (*ListStatesResponse, error)
+	// Clean specific state or all states
+	CleanState(ctx context.Context, in *CleanStateRequest, opts ...grpc.CallOption) (*CleanStateResponse, error)
+	// Delete specific state or all states
+	DeleteState(ctx context.Context, in *DeleteStateRequest, opts ...grpc.CallOption) (*DeleteStateResponse, error)
+	// SetNetworkMapPersistence enables or disables network map persistence
+	SetNetworkMapPersistence(ctx context.Context, in *SetNetworkMapPersistenceRequest, opts ...grpc.CallOption) (*SetNetworkMapPersistenceResponse, error)
+	TracePacket(ctx context.Context, in *TracePacketRequest, opts ...grpc.CallOption) (*TracePacketResponse, error)
+	SubscribeEvents(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (DaemonService_SubscribeEventsClient, error)
+	GetEvents(ctx context.Context, in *GetEventsRequest, opts ...grpc.CallOption) (*GetEventsResponse, error)
 }
 
 type daemonServiceClient struct {
@@ -95,6 +118,146 @@ func (c *daemonServiceClient) GetConfig(ctx context.Context, in *GetConfigReques
 	return out, nil
 }
 
+func (c *daemonServiceClient) ListNetworks(ctx context.Context, in *ListNetworksRequest, opts ...grpc.CallOption) (*ListNetworksResponse, error) {
+	out := new(ListNetworksResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/ListNetworks", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) SelectNetworks(ctx context.Context, in *SelectNetworksRequest, opts ...grpc.CallOption) (*SelectNetworksResponse, error) {
+	out := new(SelectNetworksResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/SelectNetworks", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) DeselectNetworks(ctx context.Context, in *SelectNetworksRequest, opts ...grpc.CallOption) (*SelectNetworksResponse, error) {
+	out := new(SelectNetworksResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/DeselectNetworks", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) DebugBundle(ctx context.Context, in *DebugBundleRequest, opts ...grpc.CallOption) (*DebugBundleResponse, error) {
+	out := new(DebugBundleResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/DebugBundle", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) GetLogLevel(ctx context.Context, in *GetLogLevelRequest, opts ...grpc.CallOption) (*GetLogLevelResponse, error) {
+	out := new(GetLogLevelResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/GetLogLevel", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) SetLogLevel(ctx context.Context, in *SetLogLevelRequest, opts ...grpc.CallOption) (*SetLogLevelResponse, error) {
+	out := new(SetLogLevelResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/SetLogLevel", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) ListStates(ctx context.Context, in *ListStatesRequest, opts ...grpc.CallOption) (*ListStatesResponse, error) {
+	out := new(ListStatesResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/ListStates", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) CleanState(ctx context.Context, in *CleanStateRequest, opts ...grpc.CallOption) (*CleanStateResponse, error) {
+	out := new(CleanStateResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/CleanState", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) DeleteState(ctx context.Context, in *DeleteStateRequest, opts ...grpc.CallOption) (*DeleteStateResponse, error) {
+	out := new(DeleteStateResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/DeleteState", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) SetNetworkMapPersistence(ctx context.Context, in *SetNetworkMapPersistenceRequest, opts ...grpc.CallOption) (*SetNetworkMapPersistenceResponse, error) {
+	out := new(SetNetworkMapPersistenceResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/SetNetworkMapPersistence", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) TracePacket(ctx context.Context, in *TracePacketRequest, opts ...grpc.CallOption) (*TracePacketResponse, error) {
+	out := new(TracePacketResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/TracePacket", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *daemonServiceClient) SubscribeEvents(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (DaemonService_SubscribeEventsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &DaemonService_ServiceDesc.Streams[0], "/daemon.DaemonService/SubscribeEvents", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &daemonServiceSubscribeEventsClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type DaemonService_SubscribeEventsClient interface {
+	Recv() (*SystemEvent, error)
+	grpc.ClientStream
+}
+
+type daemonServiceSubscribeEventsClient struct {
+	grpc.ClientStream
+}
+
+func (x *daemonServiceSubscribeEventsClient) Recv() (*SystemEvent, error) {
+	m := new(SystemEvent)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (c *daemonServiceClient) GetEvents(ctx context.Context, in *GetEventsRequest, opts ...grpc.CallOption) (*GetEventsResponse, error) {
+	out := new(GetEventsResponse)
+	err := c.cc.Invoke(ctx, "/daemon.DaemonService/GetEvents", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DaemonServiceServer is the server API for DaemonService service.
 // All implementations must embed UnimplementedDaemonServiceServer
 // for forward compatibility
@@ -112,6 +275,29 @@ type DaemonServiceServer interface {
 	Down(context.Context, *DownRequest) (*DownResponse, error)
 	// GetConfig of the daemon.
 	GetConfig(context.Context, *GetConfigRequest) (*GetConfigResponse, error)
+	// List available networks
+	ListNetworks(context.Context, *ListNetworksRequest) (*ListNetworksResponse, error)
+	// Select specific routes
+	SelectNetworks(context.Context, *SelectNetworksRequest) (*SelectNetworksResponse, error)
+	// Deselect specific routes
+	DeselectNetworks(context.Context, *SelectNetworksRequest) (*SelectNetworksResponse, error)
+	// DebugBundle creates a debug bundle
+	DebugBundle(context.Context, *DebugBundleRequest) (*DebugBundleResponse, error)
+	// GetLogLevel gets the log level of the daemon
+	GetLogLevel(context.Context, *GetLogLevelRequest) (*GetLogLevelResponse, error)
+	// SetLogLevel sets the log level of the daemon
+	SetLogLevel(context.Context, *SetLogLevelRequest) (*SetLogLevelResponse, error)
+	// List all states
+	ListStates(context.Context, *ListStatesRequest) (*ListStatesResponse, error)
+	// Clean specific state or all states
+	CleanState(context.Context, *CleanStateRequest) (*CleanStateResponse, error)
+	// Delete specific state or all states
+	DeleteState(context.Context, *DeleteStateRequest) (*DeleteStateResponse, error)
+	// SetNetworkMapPersistence enables or disables network map persistence
+	SetNetworkMapPersistence(context.Context, *SetNetworkMapPersistenceRequest) (*SetNetworkMapPersistenceResponse, error)
+	TracePacket(context.Context, *TracePacketRequest) (*TracePacketResponse, error)
+	SubscribeEvents(*SubscribeRequest, DaemonService_SubscribeEventsServer) error
+	GetEvents(context.Context, *GetEventsRequest) (*GetEventsResponse, error)
 	mustEmbedUnimplementedDaemonServiceServer()
 }
 
@@ -136,6 +322,45 @@ func (UnimplementedDaemonServiceServer) Down(context.Context, *DownRequest) (*Do
 }
 func (UnimplementedDaemonServiceServer) GetConfig(context.Context, *GetConfigRequest) (*GetConfigResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetConfig not implemented")
+}
+func (UnimplementedDaemonServiceServer) ListNetworks(context.Context, *ListNetworksRequest) (*ListNetworksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListNetworks not implemented")
+}
+func (UnimplementedDaemonServiceServer) SelectNetworks(context.Context, *SelectNetworksRequest) (*SelectNetworksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SelectNetworks not implemented")
+}
+func (UnimplementedDaemonServiceServer) DeselectNetworks(context.Context, *SelectNetworksRequest) (*SelectNetworksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeselectNetworks not implemented")
+}
+func (UnimplementedDaemonServiceServer) DebugBundle(context.Context, *DebugBundleRequest) (*DebugBundleResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DebugBundle not implemented")
+}
+func (UnimplementedDaemonServiceServer) GetLogLevel(context.Context, *GetLogLevelRequest) (*GetLogLevelResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetLogLevel not implemented")
+}
+func (UnimplementedDaemonServiceServer) SetLogLevel(context.Context, *SetLogLevelRequest) (*SetLogLevelResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetLogLevel not implemented")
+}
+func (UnimplementedDaemonServiceServer) ListStates(context.Context, *ListStatesRequest) (*ListStatesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListStates not implemented")
+}
+func (UnimplementedDaemonServiceServer) CleanState(context.Context, *CleanStateRequest) (*CleanStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CleanState not implemented")
+}
+func (UnimplementedDaemonServiceServer) DeleteState(context.Context, *DeleteStateRequest) (*DeleteStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteState not implemented")
+}
+func (UnimplementedDaemonServiceServer) SetNetworkMapPersistence(context.Context, *SetNetworkMapPersistenceRequest) (*SetNetworkMapPersistenceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetNetworkMapPersistence not implemented")
+}
+func (UnimplementedDaemonServiceServer) TracePacket(context.Context, *TracePacketRequest) (*TracePacketResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TracePacket not implemented")
+}
+func (UnimplementedDaemonServiceServer) SubscribeEvents(*SubscribeRequest, DaemonService_SubscribeEventsServer) error {
+	return status.Errorf(codes.Unimplemented, "method SubscribeEvents not implemented")
+}
+func (UnimplementedDaemonServiceServer) GetEvents(context.Context, *GetEventsRequest) (*GetEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetEvents not implemented")
 }
 func (UnimplementedDaemonServiceServer) mustEmbedUnimplementedDaemonServiceServer() {}
 
@@ -258,6 +483,243 @@ func _DaemonService_GetConfig_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DaemonService_ListNetworks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListNetworksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).ListNetworks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/ListNetworks",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).ListNetworks(ctx, req.(*ListNetworksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_SelectNetworks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelectNetworksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).SelectNetworks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/SelectNetworks",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).SelectNetworks(ctx, req.(*SelectNetworksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_DeselectNetworks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelectNetworksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).DeselectNetworks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/DeselectNetworks",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).DeselectNetworks(ctx, req.(*SelectNetworksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_DebugBundle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DebugBundleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).DebugBundle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/DebugBundle",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).DebugBundle(ctx, req.(*DebugBundleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_GetLogLevel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLogLevelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).GetLogLevel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/GetLogLevel",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).GetLogLevel(ctx, req.(*GetLogLevelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_SetLogLevel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetLogLevelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).SetLogLevel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/SetLogLevel",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).SetLogLevel(ctx, req.(*SetLogLevelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_ListStates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListStatesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).ListStates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/ListStates",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).ListStates(ctx, req.(*ListStatesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_CleanState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CleanStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).CleanState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/CleanState",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).CleanState(ctx, req.(*CleanStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_DeleteState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).DeleteState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/DeleteState",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).DeleteState(ctx, req.(*DeleteStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_SetNetworkMapPersistence_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetNetworkMapPersistenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).SetNetworkMapPersistence(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/SetNetworkMapPersistence",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).SetNetworkMapPersistence(ctx, req.(*SetNetworkMapPersistenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_TracePacket_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TracePacketRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).TracePacket(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/TracePacket",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).TracePacket(ctx, req.(*TracePacketRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _DaemonService_SubscribeEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(DaemonServiceServer).SubscribeEvents(m, &daemonServiceSubscribeEventsServer{stream})
+}
+
+type DaemonService_SubscribeEventsServer interface {
+	Send(*SystemEvent) error
+	grpc.ServerStream
+}
+
+type daemonServiceSubscribeEventsServer struct {
+	grpc.ServerStream
+}
+
+func (x *daemonServiceSubscribeEventsServer) Send(m *SystemEvent) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func _DaemonService_GetEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServiceServer).GetEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/daemon.DaemonService/GetEvents",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServiceServer).GetEvents(ctx, req.(*GetEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DaemonService_ServiceDesc is the grpc.ServiceDesc for DaemonService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -289,7 +751,61 @@ var DaemonService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetConfig",
 			Handler:    _DaemonService_GetConfig_Handler,
 		},
+		{
+			MethodName: "ListNetworks",
+			Handler:    _DaemonService_ListNetworks_Handler,
+		},
+		{
+			MethodName: "SelectNetworks",
+			Handler:    _DaemonService_SelectNetworks_Handler,
+		},
+		{
+			MethodName: "DeselectNetworks",
+			Handler:    _DaemonService_DeselectNetworks_Handler,
+		},
+		{
+			MethodName: "DebugBundle",
+			Handler:    _DaemonService_DebugBundle_Handler,
+		},
+		{
+			MethodName: "GetLogLevel",
+			Handler:    _DaemonService_GetLogLevel_Handler,
+		},
+		{
+			MethodName: "SetLogLevel",
+			Handler:    _DaemonService_SetLogLevel_Handler,
+		},
+		{
+			MethodName: "ListStates",
+			Handler:    _DaemonService_ListStates_Handler,
+		},
+		{
+			MethodName: "CleanState",
+			Handler:    _DaemonService_CleanState_Handler,
+		},
+		{
+			MethodName: "DeleteState",
+			Handler:    _DaemonService_DeleteState_Handler,
+		},
+		{
+			MethodName: "SetNetworkMapPersistence",
+			Handler:    _DaemonService_SetNetworkMapPersistence_Handler,
+		},
+		{
+			MethodName: "TracePacket",
+			Handler:    _DaemonService_TracePacket_Handler,
+		},
+		{
+			MethodName: "GetEvents",
+			Handler:    _DaemonService_GetEvents_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "SubscribeEvents",
+			Handler:       _DaemonService_SubscribeEvents_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "daemon.proto",
 }

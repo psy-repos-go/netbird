@@ -1,29 +1,29 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	nbpeer "github.com/netbirdio/netbird/management/server/peer"
+	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/management/server/types"
 )
 
 type MockStore struct {
-	Store
-	account *Account
+	store.Store
+	account *types.Account
 }
 
-func (s *MockStore) GetAllAccounts() []*Account {
-	return []*Account{s.account}
-}
-
-func (s *MockStore) GetAccountByPeerID(peerId string) (*Account, error) {
-	_, ok := s.account.Peers[peerId]
-	if ok {
-		return s.account, nil
+func (s *MockStore) GetAllEphemeralPeers(_ context.Context, _ store.LockingStrength) ([]*nbpeer.Peer, error) {
+	var peers []*nbpeer.Peer
+	for _, v := range s.account.Peers {
+		if v.Ephemeral {
+			peers = append(peers, v)
+		}
 	}
-
-	return nil, fmt.Errorf("account not found")
+	return peers, nil
 }
 
 type MocAccountManager struct {
@@ -31,7 +31,7 @@ type MocAccountManager struct {
 	store *MockStore
 }
 
-func (a MocAccountManager) DeletePeer(accountID, peerID, userID string) error {
+func (a MocAccountManager) DeletePeer(_ context.Context, accountID, peerID, userID string) error {
 	delete(a.store.account.Peers, peerID)
 	return nil //nolint:nil
 }
@@ -52,9 +52,9 @@ func TestNewManager(t *testing.T) {
 	seedPeers(store, numberOfPeers, numberOfEphemeralPeers)
 
 	mgr := NewEphemeralManager(store, am)
-	mgr.loadEphemeralPeers()
+	mgr.loadEphemeralPeers(context.Background())
 	startTime = startTime.Add(ephemeralLifeTime + 1)
-	mgr.cleanup()
+	mgr.cleanup(context.Background())
 
 	if len(store.account.Peers) != numberOfPeers {
 		t.Errorf("failed to cleanup ephemeral peers, expected: %d, result: %d", numberOfPeers, len(store.account.Peers))
@@ -77,11 +77,11 @@ func TestNewManagerPeerConnected(t *testing.T) {
 	seedPeers(store, numberOfPeers, numberOfEphemeralPeers)
 
 	mgr := NewEphemeralManager(store, am)
-	mgr.loadEphemeralPeers()
-	mgr.OnPeerConnected(store.account.Peers["ephemeral_peer_0"])
+	mgr.loadEphemeralPeers(context.Background())
+	mgr.OnPeerConnected(context.Background(), store.account.Peers["ephemeral_peer_0"])
 
 	startTime = startTime.Add(ephemeralLifeTime + 1)
-	mgr.cleanup()
+	mgr.cleanup(context.Background())
 
 	expected := numberOfPeers + 1
 	if len(store.account.Peers) != expected {
@@ -105,15 +105,15 @@ func TestNewManagerPeerDisconnected(t *testing.T) {
 	seedPeers(store, numberOfPeers, numberOfEphemeralPeers)
 
 	mgr := NewEphemeralManager(store, am)
-	mgr.loadEphemeralPeers()
+	mgr.loadEphemeralPeers(context.Background())
 	for _, v := range store.account.Peers {
-		mgr.OnPeerConnected(v)
+		mgr.OnPeerConnected(context.Background(), v)
 
 	}
-	mgr.OnPeerDisconnected(store.account.Peers["ephemeral_peer_0"])
+	mgr.OnPeerDisconnected(context.Background(), store.account.Peers["ephemeral_peer_0"])
 
 	startTime = startTime.Add(ephemeralLifeTime + 1)
-	mgr.cleanup()
+	mgr.cleanup(context.Background())
 
 	expected := numberOfPeers + numberOfEphemeralPeers - 1
 	if len(store.account.Peers) != expected {
@@ -122,7 +122,7 @@ func TestNewManagerPeerDisconnected(t *testing.T) {
 }
 
 func seedPeers(store *MockStore, numberOfPeers int, numberOfEphemeralPeers int) {
-	store.account = newAccountWithId("my account", "", "")
+	store.account = newAccountWithId(context.Background(), "my account", "", "")
 
 	for i := 0; i < numberOfPeers; i++ {
 		peerId := fmt.Sprintf("peer_%d", i)

@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"context"
-	"runtime"
+	"sync"
 
 	"github.com/kardianos/service"
 	log "github.com/sirupsen/logrus"
@@ -10,12 +10,15 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/server"
 )
 
 type program struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	serv   *grpc.Server
+	ctx              context.Context
+	cancel           context.CancelFunc
+	serv             *grpc.Server
+	serverInstance   *server.Server
+	serverInstanceMu sync.Mutex
 }
 
 func newProgram(ctx context.Context, cancel context.CancelFunc) *program {
@@ -24,12 +27,8 @@ func newProgram(ctx context.Context, cancel context.CancelFunc) *program {
 }
 
 func newSVCConfig() *service.Config {
-	name := "netbird"
-	if runtime.GOOS == "windows" {
-		name = "Netbird"
-	}
 	return &service.Config{
-		Name:        name,
+		Name:        serviceName,
 		DisplayName: "Netbird",
 		Description: "A WireGuard-based mesh network that connects your devices into a single private network.",
 		Option:      make(service.KeyValue),

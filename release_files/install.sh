@@ -21,6 +21,8 @@ SUDO=""
 
 if command -v sudo > /dev/null && [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
+elif command -v doas > /dev/null && [ "$(id -u)" -ne 0 ]; then
+    SUDO="doas"
 fi
 
 if [ -z ${NETBIRD_RELEASE+x} ]; then
@@ -31,14 +33,16 @@ get_release() {
     local RELEASE=$1
     if [ "$RELEASE" = "latest" ]; then
         local TAG="latest"
+        local URL="https://pkgs.netbird.io/releases/latest"
     else
         local TAG="tags/${RELEASE}"
+        local URL="https://api.github.com/repos/${OWNER}/${REPO}/releases/${TAG}"
     fi
     if [ -n "$GITHUB_TOKEN" ]; then
-          curl -H  "Authorization: token ${GITHUB_TOKEN}" -s "https://api.github.com/repos/${OWNER}/${REPO}/releases/${TAG}" \
+          curl -H  "Authorization: token ${GITHUB_TOKEN}" -s "${URL}" \
               | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
     else
-          curl -s "https://api.github.com/repos/${OWNER}/${REPO}/releases/${TAG}" \
+          curl -s "${URL}" \
               | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
     fi
 }
@@ -68,7 +72,7 @@ download_release_binary() {
     if [ -n "$GITHUB_TOKEN" ]; then
       cd /tmp && curl -H  "Authorization: token ${GITHUB_TOKEN}" -LO "$DOWNLOAD_URL"
     else
-      cd /tmp && curl -LO "$DOWNLOAD_URL"
+      cd /tmp && curl -LO "$DOWNLOAD_URL" || curl -LO --dns-servers 8.8.8.8 "$DOWNLOAD_URL"
     fi
 
 
@@ -82,7 +86,7 @@ download_release_binary() {
 
         # Unzip the app and move to INSTALL_DIR
         unzip -q -o "$BINARY_NAME"
-        mv "netbird_ui_${OS_TYPE}_${ARCH}/" "$INSTALL_DIR/"
+        mv -v "netbird_ui_${OS_TYPE}/" "$INSTALL_DIR/" || mv -v "netbird_ui_${OS_TYPE}_${ARCH}/" "$INSTALL_DIR/"
     else
         ${SUDO} mkdir -p "$INSTALL_DIR"
         tar -xzvf "$BINARY_NAME"
@@ -149,6 +153,22 @@ add_aur_repo() {
 
     # Clean up the installed packages
     ${SUDO} pacman -Rs "$REMOVE_PKGS" --noconfirm
+}
+
+prepare_tun_module() {
+  # Create the necessary file structure for /dev/net/tun
+  if [ ! -c /dev/net/tun ]; then
+    if [ ! -d /dev/net ]; then
+      mkdir -m 755 /dev/net
+    fi
+    mknod /dev/net/tun c 10 200
+    chmod 0755 /dev/net/tun
+  fi
+
+  # Load the tun module if not already loaded
+  if ! lsmod | grep -q "^tun\s"; then
+    insmod /lib/modules/tun.ko
+  fi
 }
 
 install_native_binaries() {
@@ -219,11 +239,23 @@ install_netbird() {
     dnf)
         add_rpm_repo
         ${SUDO} dnf -y install dnf-plugin-config-manager
-        ${SUDO} dnf config-manager --add-repo /etc/yum.repos.d/netbird.repo
+        if [[ "$(dnf --version | head -n1 | cut -d. -f1)" > "4" ]];
+        then
+          ${SUDO} dnf config-manager addrepo --from-repofile=/etc/yum.repos.d/netbird.repo
+        else
+          ${SUDO} dnf config-manager --add-repo /etc/yum.repos.d/netbird.repo
+        fi
         ${SUDO} dnf -y install netbird
 
         if ! $SKIP_UI_APP; then
             ${SUDO} dnf -y install netbird-ui
+        fi
+    ;;
+    rpm-ostree)
+        add_rpm_repo
+        ${SUDO} rpm-ostree -y install netbird
+        if ! $SKIP_UI_APP; then
+            ${SUDO} rpm-ostree -y install netbird-ui
         fi
     ;;
     pacman)
@@ -231,16 +263,16 @@ install_netbird() {
         add_aur_repo
     ;;
     brew)
-        # Remove Wiretrustee if it had been installed using Homebrew before
-        if brew ls --versions wiretrustee >/dev/null 2>&1; then
-            echo "Removing existing wiretrustee client"
+        # Remove Netbird if it had been installed using Homebrew before
+        if brew ls --versions netbird >/dev/null 2>&1; then
+            echo "Removing existing netbird client"
 
             # Stop and uninstall daemon service:
-            wiretrustee service stop
-            wiretrustee service uninstall
+            netbird service stop
+            netbird service uninstall
 
             # Unlik the app
-            brew unlink wiretrustee
+            brew unlink netbird
         fi
 
         brew install netbirdio/tap/netbird
@@ -268,16 +300,22 @@ install_netbird() {
     ;;
     esac
 
+    if [ "$OS_NAME" = "synology" ]; then
+        prepare_tun_module
+    fi
+
     # Add package manager to config
     ${SUDO} mkdir -p "$CONFIG_FOLDER"
     echo "package_manager=$PACKAGE_MANAGER" | ${SUDO} tee "$CONFIG_FILE" > /dev/null
 
     # Load and start netbird service
-    if  ! ${SUDO} netbird service install 2>&1; then
-        echo "NetBird service has already been loaded"
-    fi
-    if  ! ${SUDO} netbird service start 2>&1; then
-        echo "NetBird service has already been started"
+    if [ "$PACKAGE_MANAGER" != "rpm-ostree" ]; then
+        if ! ${SUDO} netbird service install 2>&1; then
+            echo "NetBird service has already been loaded"
+        fi
+        if ! ${SUDO} netbird service start 2>&1; then
+            echo "NetBird service has already been started"
+        fi
     fi
 
 
@@ -287,7 +325,7 @@ install_netbird() {
 }
 
 version_greater_equal() {
-    printf '%s\n%s\n' "$2" "$1" | sort -V -C
+    printf '%s\n%s\n' "$2" "$1" | sort -V -c
 }
 
 is_bin_package_manager() {
@@ -349,39 +387,58 @@ fi
 if type uname >/dev/null 2>&1; then
 	case "$(uname)" in
         Linux)
-            OS_NAME="$(. /etc/os-release && echo "$ID")"
-            OS_TYPE="linux"
-            INSTALL_DIR="/usr/bin"
+          OS_TYPE="linux"
+          UNAME_OUTPUT="$(uname -a)"
+          if echo "$UNAME_OUTPUT" | grep -qi "synology"; then
+            OS_NAME="synology"
+            INSTALL_DIR="/usr/local/bin"
+            PACKAGE_MANAGER="bin"
+            SKIP_UI_APP=true
+          else
+            if [ -f /etc/os-release ]; then
+              OS_NAME="$(. /etc/os-release && echo "$ID")"
+              INSTALL_DIR="/usr/bin"
 
-            # Allow netbird UI installation for x64 arch only
-            if [ "$ARCH" != "amd64" ] && [ "$ARCH" != "arm64" ] \
-                && [ "$ARCH" != "x86_64" ];then
-                SKIP_UI_APP=true
-                echo "NetBird UI installation will be omitted as $ARCH is not a compatible architecture"
-            fi
+              # Allow netbird UI installation for x64 arch only
+              if [ "$ARCH" != "amd64" ] && [ "$ARCH" != "arm64" ] \
+                  && [ "$ARCH" != "x86_64" ];then
+                  SKIP_UI_APP=true
+                  echo "NetBird UI installation will be omitted as $ARCH is not a compatible architecture"
+              fi
 
-            # Allow netbird UI installation for linux running desktop environment
-            if [ -z "$XDG_CURRENT_DESKTOP" ];then
-                SKIP_UI_APP=true
-                echo "NetBird UI installation will be omitted as Linux does not run desktop environment"
-            fi
+              # Allow netbird UI installation for linux running desktop environment
+              if [ -z "$XDG_CURRENT_DESKTOP" ];then
+                  SKIP_UI_APP=true
+                  echo "NetBird UI installation will be omitted as Linux does not run desktop environment"
+              fi
 
-            # Check the availability of a compatible package manager
-            if check_use_bin_variable; then
-                PACKAGE_MANAGER="bin"
-            elif [ -x "$(command -v apt)" ]; then
-                PACKAGE_MANAGER="apt"
-                echo "The installation will be performed using apt package manager"
-            elif [ -x "$(command -v dnf)" ]; then
-                PACKAGE_MANAGER="dnf"
-                echo "The installation will be performed using dnf package manager"
-            elif [ -x "$(command -v yum)" ]; then
-                PACKAGE_MANAGER="yum"
-                echo "The installation will be performed using yum package manager"
-            elif [ -x "$(command -v pacman)" ]; then
-                PACKAGE_MANAGER="pacman"
-                echo "The installation will be performed using pacman package manager"
+              # Check the availability of a compatible package manager
+              if check_use_bin_variable; then
+                  PACKAGE_MANAGER="bin"
+              elif [ -x "$(command -v apt-get)" ]; then
+                  PACKAGE_MANAGER="apt"
+                  echo "The installation will be performed using apt package manager"
+              elif [ -x "$(command -v dnf)" ]; then
+                  PACKAGE_MANAGER="dnf"
+                  echo "The installation will be performed using dnf package manager"
+              elif [ -x "$(command -v rpm-ostree)" ]; then
+                  PACKAGE_MANAGER="rpm-ostree"
+                  echo "The installation will be performed using rpm-ostree package manager"
+              elif [ -x "$(command -v yum)" ]; then
+                  PACKAGE_MANAGER="yum"
+                  echo "The installation will be performed using yum package manager"
+              elif [ -x "$(command -v pacman)" ]; then
+                  PACKAGE_MANAGER="pacman"
+                  echo "The installation will be performed using pacman package manager"
+              fi
+
+            else
+              echo "Unable to determine OS type from /etc/os-release"
+              exit 1
             fi
+          fi
+
+
 		;;
 		Darwin)
             OS_NAME="macos"

@@ -1,14 +1,20 @@
 package server
 
 import (
+	"context"
 	"net/netip"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	nbdns "github.com/netbirdio/netbird/dns"
 	"github.com/netbirdio/netbird/management/server/activity"
 	nbpeer "github.com/netbirdio/netbird/management/server/peer"
+	"github.com/netbirdio/netbird/management/server/store"
+	"github.com/netbirdio/netbird/management/server/telemetry"
+	"github.com/netbirdio/netbird/management/server/types"
 )
 
 const (
@@ -20,6 +26,7 @@ const (
 	nsGroupPeer2Key     = "/yF0+vCfv+mRR5k0dca0TrGdO/oiNeAI58gToZm5NyI="
 	validDomain         = "example.com"
 	invalidDomain       = "dnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdnsdns.com"
+	testUserID          = "testingUser"
 )
 
 func TestCreateNameServerGroup(t *testing.T) {
@@ -215,7 +222,7 @@ func TestCreateNameServerGroup(t *testing.T) {
 			shouldCreate: false,
 		},
 		{
-			name: "Create A NS Group With More Than 2 Nameservers Should Fail",
+			name: "Create A NS Group With More Than 3 Nameservers Should Fail",
 			inputArgs: input{
 				name:        "super",
 				description: "super",
@@ -234,6 +241,11 @@ func TestCreateNameServerGroup(t *testing.T) {
 					},
 					{
 						IP:     netip.MustParseAddr("1.1.3.3"),
+						NSType: nbdns.UDPNameServerType,
+						Port:   nbdns.DefaultDNSPort,
+					},
+					{
+						IP:     netip.MustParseAddr("1.1.4.4"),
 						NSType: nbdns.UDPNameServerType,
 						Port:   nbdns.DefaultDNSPort,
 					},
@@ -367,15 +379,16 @@ func TestCreateNameServerGroup(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			am, err := createNSManager(t)
 			if err != nil {
-				t.Error("failed to create account manager")
+				t.Fatalf("failed to create account manager: %s", err)
 			}
 
 			account, err := initTestNSAccount(t, am)
 			if err != nil {
-				t.Error("failed to init testing account")
+				t.Fatalf("failed to init testing account: %s", err)
 			}
 
 			outNSGroup, err := am.CreateNameServerGroup(
+				context.Background(),
 				account.Id,
 				testCase.inputArgs.name,
 				testCase.inputArgs.description,
@@ -453,6 +466,11 @@ func TestSaveNameServerGroup(t *testing.T) {
 		},
 		{
 			IP:     netip.MustParseAddr("1.1.3.3"),
+			NSType: nbdns.UDPNameServerType,
+			Port:   nbdns.DefaultDNSPort,
+		},
+		{
+			IP:     netip.MustParseAddr("1.1.4.4"),
 			NSType: nbdns.UDPNameServerType,
 			Port:   nbdns.DefaultDNSPort,
 		},
@@ -589,17 +607,17 @@ func TestSaveNameServerGroup(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			am, err := createNSManager(t)
 			if err != nil {
-				t.Error("failed to create account manager")
+				t.Fatalf("failed to create account manager: %s", err)
 			}
 
 			account, err := initTestNSAccount(t, am)
 			if err != nil {
-				t.Error("failed to init testing account")
+				t.Fatalf("failed to init testing account: %s", err)
 			}
 
 			account.NameServerGroups[testCase.existingNSGroup.ID] = testCase.existingNSGroup
 
-			err = am.Store.SaveAccount(account)
+			err = am.Store.SaveAccount(context.Background(), account)
 			if err != nil {
 				t.Error("account should be saved")
 			}
@@ -634,7 +652,7 @@ func TestSaveNameServerGroup(t *testing.T) {
 				}
 			}
 
-			err = am.SaveNameServerGroup(account.Id, userID, nsGroupToSave)
+			err = am.SaveNameServerGroup(context.Background(), account.Id, userID, nsGroupToSave)
 
 			testCase.errFunc(t, err)
 
@@ -642,7 +660,7 @@ func TestSaveNameServerGroup(t *testing.T) {
 				return
 			}
 
-			account, err = am.Store.GetAccount(account.Id)
+			account, err = am.Store.GetAccount(context.Background(), account.Id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -688,22 +706,22 @@ func TestDeleteNameServerGroup(t *testing.T) {
 
 	account, err := initTestNSAccount(t, am)
 	if err != nil {
-		t.Error("failed to init testing account")
+		t.Fatalf("failed to init testing account: %s", err)
 	}
 
 	account.NameServerGroups[testingNSGroup.ID] = testingNSGroup
 
-	err = am.Store.SaveAccount(account)
+	err = am.Store.SaveAccount(context.Background(), account)
 	if err != nil {
 		t.Error("failed to save account")
 	}
 
-	err = am.DeleteNameServerGroup(account.Id, testingNSGroup.ID, userID)
+	err = am.DeleteNameServerGroup(context.Background(), account.Id, testingNSGroup.ID, userID)
 	if err != nil {
 		t.Error("deleting nameserver group failed with error: ", err)
 	}
 
-	savedAccount, err := am.Store.GetAccount(account.Id)
+	savedAccount, err := am.Store.GetAccount(context.Background(), account.Id)
 	if err != nil {
 		t.Error("failed to retrieve saved account with error: ", err)
 	}
@@ -723,10 +741,10 @@ func TestGetNameServerGroup(t *testing.T) {
 
 	account, err := initTestNSAccount(t, am)
 	if err != nil {
-		t.Error("failed to init testing account")
+		t.Fatalf("failed to init testing account: %s", err)
 	}
 
-	foundGroup, err := am.GetNameServerGroup(account.Id, existingNSGroupID)
+	foundGroup, err := am.GetNameServerGroup(context.Background(), account.Id, testUserID, existingNSGroupID)
 	if err != nil {
 		t.Error("getting existing nameserver group failed with error: ", err)
 	}
@@ -735,7 +753,7 @@ func TestGetNameServerGroup(t *testing.T) {
 		t.Error("got a nil group while getting nameserver group with ID")
 	}
 
-	_, err = am.GetNameServerGroup(account.Id, "not existing")
+	_, err = am.GetNameServerGroup(context.Background(), account.Id, testUserID, "not existing")
 	if err == nil {
 		t.Error("getting not existing nameserver group should return error, got nil")
 	}
@@ -743,26 +761,32 @@ func TestGetNameServerGroup(t *testing.T) {
 
 func createNSManager(t *testing.T) (*DefaultAccountManager, error) {
 	t.Helper()
+
 	store, err := createNSStore(t)
 	if err != nil {
 		return nil, err
 	}
 	eventStore := &activity.InMemoryEventStore{}
-	return BuildManager(store, NewPeersUpdateManager(nil), nil, "", "", eventStore, false)
+
+	metrics, err := telemetry.NewDefaultAppMetrics(context.Background())
+	require.NoError(t, err)
+
+	return BuildManager(context.Background(), store, NewPeersUpdateManager(nil), nil, "", "netbird.selfhosted", eventStore, nil, false, MocIntegratedValidator{}, metrics)
 }
 
-func createNSStore(t *testing.T) (Store, error) {
+func createNSStore(t *testing.T) (store.Store, error) {
 	t.Helper()
 	dataDir := t.TempDir()
-	store, err := NewStoreFromJson(dataDir, nil)
+	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), "", dataDir)
 	if err != nil {
 		return nil, err
 	}
+	t.Cleanup(cleanUp)
 
 	return store, nil
 }
 
-func initTestNSAccount(t *testing.T, am *DefaultAccountManager) (*Account, error) {
+func initTestNSAccount(t *testing.T, am *DefaultAccountManager) (*types.Account, error) {
 	t.Helper()
 	peer1 := &nbpeer.Peer{
 		Key:  nsGroupPeer1Key,
@@ -813,19 +837,19 @@ func initTestNSAccount(t *testing.T, am *DefaultAccountManager) (*Account, error
 	}
 
 	accountID := "testingAcc"
-	userID := "testingUser"
+	userID := testUserID
 	domain := "example.com"
 
-	account := newAccountWithId(accountID, userID, domain)
+	account := newAccountWithId(context.Background(), accountID, userID, domain)
 
 	account.NameServerGroups[existingNSGroup.ID] = &existingNSGroup
 
-	newGroup1 := &Group{
+	newGroup1 := &types.Group{
 		ID:   group1ID,
 		Name: group1ID,
 	}
 
-	newGroup2 := &Group{
+	newGroup2 := &types.Group{
 		ID:   group2ID,
 		Name: group2ID,
 	}
@@ -833,16 +857,16 @@ func initTestNSAccount(t *testing.T, am *DefaultAccountManager) (*Account, error
 	account.Groups[newGroup1.ID] = newGroup1
 	account.Groups[newGroup2.ID] = newGroup2
 
-	err := am.Store.SaveAccount(account)
+	err := am.Store.SaveAccount(context.Background(), account)
 	if err != nil {
 		return nil, err
 	}
 
-	_, _, err = am.AddPeer("", userID, peer1)
+	_, _, _, err = am.AddPeer(context.Background(), "", userID, peer1)
 	if err != nil {
 		return nil, err
 	}
-	_, _, err = am.AddPeer("", userID, peer2)
+	_, _, _, err = am.AddPeer(context.Background(), "", userID, peer2)
 	if err != nil {
 		return nil, err
 	}
@@ -914,4 +938,150 @@ func TestValidateDomain(t *testing.T) {
 		})
 	}
 
+}
+
+func TestNameServerAccountPeersUpdate(t *testing.T) {
+	manager, account, peer1, peer2, peer3 := setupNetworkMapTest(t)
+
+	var newNameServerGroupA *nbdns.NameServerGroup
+	var newNameServerGroupB *nbdns.NameServerGroup
+
+	err := manager.SaveGroups(context.Background(), account.Id, userID, []*types.Group{
+		{
+			ID:    "groupA",
+			Name:  "GroupA",
+			Peers: []string{},
+		},
+		{
+			ID:    "groupB",
+			Name:  "GroupB",
+			Peers: []string{peer1.ID, peer2.ID, peer3.ID},
+		},
+	})
+	assert.NoError(t, err)
+
+	updMsg := manager.peersUpdateManager.CreateChannel(context.Background(), peer1.ID)
+	t.Cleanup(func() {
+		manager.peersUpdateManager.CloseChannel(context.Background(), peer1.ID)
+	})
+
+	// Creating a nameserver group with a distribution group no peers should not update account peers
+	// and not send peer update
+	t.Run("creating nameserver group with distribution group no peers", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			peerShouldNotReceiveUpdate(t, updMsg)
+			close(done)
+		}()
+
+		newNameServerGroupA, err = manager.CreateNameServerGroup(
+			context.Background(), account.Id, "nsGroupA", "nsGroupA", []nbdns.NameServer{{
+				IP:     netip.MustParseAddr("1.1.1.1"),
+				NSType: nbdns.UDPNameServerType,
+				Port:   nbdns.DefaultDNSPort,
+			}},
+			[]string{"groupA"},
+			true, []string{}, true, userID, false,
+		)
+		assert.NoError(t, err)
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("timeout waiting for peerShouldNotReceiveUpdate")
+		}
+	})
+
+	// saving a nameserver group with a distribution group with no peers should not update account peers
+	// and not send peer update
+	t.Run("saving nameserver group with distribution group no peers", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			peerShouldNotReceiveUpdate(t, updMsg)
+			close(done)
+		}()
+
+		err = manager.SaveNameServerGroup(context.Background(), account.Id, userID, newNameServerGroupA)
+		assert.NoError(t, err)
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("timeout waiting for peerShouldNotReceiveUpdate")
+		}
+	})
+
+	// Creating a nameserver group with a distribution group no peers should update account peers and send peer update
+	t.Run("creating nameserver group with distribution group has peers", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			peerShouldReceiveUpdate(t, updMsg)
+			close(done)
+		}()
+
+		newNameServerGroupB, err = manager.CreateNameServerGroup(
+			context.Background(), account.Id, "nsGroupB", "nsGroupB", []nbdns.NameServer{{
+				IP:     netip.MustParseAddr("1.1.1.1"),
+				NSType: nbdns.UDPNameServerType,
+				Port:   nbdns.DefaultDNSPort,
+			}},
+			[]string{"groupB"},
+			true, []string{}, true, userID, false,
+		)
+		assert.NoError(t, err)
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("timeout waiting for peerShouldNotReceiveUpdate")
+		}
+	})
+
+	// saving a nameserver group with a distribution group with peers should update account peers and send peer update
+	t.Run("saving nameserver group with distribution group has peers", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			peerShouldReceiveUpdate(t, updMsg)
+			close(done)
+		}()
+
+		newNameServerGroupB.NameServers = []nbdns.NameServer{
+			{
+				IP:     netip.MustParseAddr("1.1.1.2"),
+				NSType: nbdns.UDPNameServerType,
+				Port:   nbdns.DefaultDNSPort,
+			},
+			{
+				IP:     netip.MustParseAddr("8.8.8.8"),
+				NSType: nbdns.UDPNameServerType,
+				Port:   nbdns.DefaultDNSPort,
+			},
+		}
+		err = manager.SaveNameServerGroup(context.Background(), account.Id, userID, newNameServerGroupB)
+		assert.NoError(t, err)
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("timeout waiting for peerShouldReceiveUpdate")
+		}
+	})
+
+	// Deleting a nameserver group should update account peers and send peer update
+	t.Run("deleting nameserver group", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			peerShouldReceiveUpdate(t, updMsg)
+			close(done)
+		}()
+
+		err = manager.DeleteNameServerGroup(context.Background(), account.Id, newNameServerGroupB.ID, userID)
+		assert.NoError(t, err)
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("timeout waiting for peerShouldReceiveUpdate")
+		}
+	})
 }

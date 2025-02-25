@@ -11,11 +11,12 @@ import (
 	"github.com/kardianos/service"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+
 	"github.com/netbirdio/netbird/client/proto"
 	"github.com/netbirdio/netbird/client/server"
 	"github.com/netbirdio/netbird/util"
-	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
 )
 
 func (p *program) Start(svc service.Service) error {
@@ -60,6 +61,10 @@ func (p *program) Start(svc service.Service) error {
 		}
 		proto.RegisterDaemonServiceServer(p.serv, serverInstance)
 
+		p.serverInstanceMu.Lock()
+		p.serverInstance = serverInstance
+		p.serverInstanceMu.Unlock()
+
 		log.Printf("started daemon server: %v", split[1])
 		if err := p.serv.Serve(listen); err != nil {
 			log.Errorf("failed to serve daemon requests: %v", err)
@@ -69,6 +74,16 @@ func (p *program) Start(svc service.Service) error {
 }
 
 func (p *program) Stop(srv service.Service) error {
+	p.serverInstanceMu.Lock()
+	if p.serverInstance != nil {
+		in := new(proto.DownRequest)
+		_, err := p.serverInstance.Down(p.ctx, in)
+		if err != nil {
+			log.Errorf("failed to stop daemon: %v", err)
+		}
+	}
+	p.serverInstanceMu.Unlock()
+
 	p.cancel()
 
 	if p.serv != nil {
@@ -109,7 +124,6 @@ var runCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		cmd.Printf("Netbird service is running")
 		return nil
 	},
 }

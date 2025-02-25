@@ -1,3 +1,6 @@
+//go:build !ios
+// +build !ios
+
 package system
 
 import (
@@ -7,6 +10,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -30,11 +34,65 @@ func GetInfo(ctx context.Context) *Info {
 		log.Warnf("got an error while retrieving macOS version with sw_vers, error: %s. Using darwin version instead.\n", err)
 		swVersion = []byte(release)
 	}
-	gio := &Info{Kernel: sysName, OSVersion: strings.TrimSpace(string(swVersion)), Core: release, Platform: machine, OS: sysName, GoOS: runtime.GOOS, CPUs: runtime.NumCPU()}
+
+	addrs, err := networkAddresses()
+	if err != nil {
+		log.Warnf("failed to discover network addresses: %s", err)
+	}
+
+	start := time.Now()
+	si := updateStaticInfo()
+	if time.Since(start) > 1*time.Second {
+		log.Warnf("updateStaticInfo took %s", time.Since(start))
+	}
+
+	gio := &Info{
+		Kernel:             sysName,
+		OSVersion:          strings.TrimSpace(string(swVersion)),
+		Platform:           machine,
+		OS:                 sysName,
+		GoOS:               runtime.GOOS,
+		CPUs:               runtime.NumCPU(),
+		KernelVersion:      release,
+		NetworkAddresses:   addrs,
+		SystemSerialNumber: si.SystemSerialNumber,
+		SystemProductName:  si.SystemProductName,
+		SystemManufacturer: si.SystemManufacturer,
+		Environment:        si.Environment,
+	}
+
 	systemHostname, _ := os.Hostname()
 	gio.Hostname = extractDeviceName(ctx, systemHostname)
-	gio.WiretrusteeVersion = version.NetbirdVersion()
+	gio.NetbirdVersion = version.NetbirdVersion()
 	gio.UIVersion = extractUserAgent(ctx)
 
 	return gio
+}
+
+func sysInfo() (serialNumber string, productName string, manufacturer string) {
+	out, _ := exec.Command("/usr/sbin/ioreg", "-l").Output() // err ignored for brevity
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.Contains(l, "IOPlatformSerialNumber") {
+			serialNumber = trimIoRegLine(l)
+		}
+
+		if strings.Contains(l, "ModelNumber") && productName == "" {
+			productName = trimIoRegLine(l)
+		}
+
+		if strings.Contains(l, "device manufacturer") && manufacturer == "" {
+			manufacturer = trimIoRegLine(l)
+		}
+
+	}
+	return
+}
+
+func trimIoRegLine(l string) string {
+	kv := strings.Split(l, "=")
+	if len(kv) != 2 {
+		return ""
+	}
+	s := strings.TrimSpace(kv[1])
+	return strings.Trim(s, `"`)
 }

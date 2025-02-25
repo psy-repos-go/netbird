@@ -1,9 +1,10 @@
 package server
 
 import (
-	"net/url"
+	"net/netip"
 
 	"github.com/netbirdio/netbird/management/server/idp"
+	"github.com/netbirdio/netbird/management/server/store"
 	"github.com/netbirdio/netbird/util"
 )
 
@@ -33,6 +34,7 @@ const (
 type Config struct {
 	Stuns      []*Host
 	TURNConfig *TURNConfig
+	Relay      *Relay
 	Signal     *Host
 
 	Datadir                string
@@ -47,11 +49,17 @@ type Config struct {
 	PKCEAuthorizationFlow *PKCEAuthorizationFlow
 
 	StoreConfig StoreConfig
+
+	ReverseProxy ReverseProxy
 }
 
 // GetAuthAudiences returns the audience from the http config and device authorization flow config
 func (c Config) GetAuthAudiences() []string {
 	audiences := []string{c.HttpConfig.AuthAudience}
+
+	if c.HttpConfig.ExtraAuthAudience != "" {
+		audiences = append(audiences, c.HttpConfig.ExtraAuthAudience)
+	}
 
 	if c.DeviceAuthorizationFlow != nil && c.DeviceAuthorizationFlow.ProviderConfig.Audience != "" {
 		audiences = append(audiences, c.DeviceAuthorizationFlow.ProviderConfig.Audience)
@@ -66,6 +74,12 @@ type TURNConfig struct {
 	CredentialsTTL       util.Duration
 	Secret               string
 	Turns                []*Host
+}
+
+type Relay struct {
+	Addresses      []string
+	CredentialsTTL util.Duration
+	Secret         string
 }
 
 // HttpServerConfig is a config of the HTTP Management service server
@@ -87,12 +101,14 @@ type HttpServerConfig struct {
 	OIDCConfigEndpoint string
 	// IdpSignKeyRefreshEnabled identifies the signing key is currently being rotated or not
 	IdpSignKeyRefreshEnabled bool
+	// Extra audience
+	ExtraAuthAudience string
 }
 
-// Host represents a Wiretrustee host (e.g. STUN, TURN, Signal)
+// Host represents a Netbird host (e.g. STUN, TURN, Signal)
 type Host struct {
 	Proto Protocol
-	// URI e.g. turns://stun.wiretrustee.com:4430 or signal.wiretrustee.com:10000
+	// URI e.g. turns://stun.netbird.io:4430 or signal.netbird.io:10000
 	URI      string
 	Username string
 	Password string
@@ -140,11 +156,26 @@ type ProviderConfig struct {
 
 // StoreConfig contains Store configuration
 type StoreConfig struct {
-	Engine StoreEngine
+	Engine store.Engine
 }
 
-// validateURL validates input http url
-func validateURL(httpURL string) bool {
-	_, err := url.ParseRequestURI(httpURL)
-	return err == nil
+// ReverseProxy contains reverse proxy configuration in front of management.
+type ReverseProxy struct {
+	// TrustedHTTPProxies represents a list of trusted HTTP proxies by their IP prefixes.
+	// When extracting the real IP address from request headers, the middleware will verify
+	// if the peer's address falls within one of these trusted IP prefixes.
+	TrustedHTTPProxies []netip.Prefix
+
+	// TrustedHTTPProxiesCount specifies the count of trusted HTTP proxies between the internet
+	// and the server. When using the trusted proxy count method to extract the real IP address,
+	// the middleware will search the X-Forwarded-For IP list from the rightmost by this count
+	// minus one.
+	TrustedHTTPProxiesCount uint
+
+	// TrustedPeers represents a list of trusted peers by their IP prefixes.
+	// These peers are considered trustworthy by the gRPC server operator,
+	// and the middleware will attempt to extract the real IP address from
+	// request headers if the peer's address falls within one of these
+	// trusted IP prefixes.
+	TrustedPeers []netip.Prefix
 }

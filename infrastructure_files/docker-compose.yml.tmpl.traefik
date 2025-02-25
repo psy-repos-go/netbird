@@ -2,7 +2,7 @@ version: "3"
 services:
   #UI dashboard
   dashboard:
-    image: wiretrustee/dashboard:latest
+    image: netbirdio/dashboard:$NETBIRD_DASHBOARD_TAG
     restart: unless-stopped
     #ports:
     #  - 80:80
@@ -35,7 +35,7 @@ services:
 
   # Signal
   signal:
-    image: netbirdio/signal:latest
+    image: netbirdio/signal:$NETBIRD_SIGNAL_TAG
     restart: unless-stopped
     volumes:
       - $SIGNAL_VOLUMENAME:/var/lib/netbird
@@ -50,9 +50,31 @@ services:
     - traefik.http.services.netbird-signal.loadbalancer.server.port=80
     - traefik.http.services.netbird-signal.loadbalancer.server.scheme=h2c
 
+  # Relay
+  relay:
+    image: netbirdio/relay:$NETBIRD_RELAY_TAG
+    restart: unless-stopped
+    environment:
+    - NB_LOG_LEVEL=info
+    - NB_LISTEN_ADDRESS=:$NETBIRD_RELAY_PORT
+    - NB_EXPOSED_ADDRESS=$NETBIRD_RELAY_DOMAIN:$NETBIRD_RELAY_PORT
+    # todo: change to a secure secret
+    - NB_AUTH_SECRET=$NETBIRD_RELAY_AUTH_SECRET
+    ports:
+      - $NETBIRD_RELAY_PORT:$NETBIRD_RELAY_PORT
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "500m"
+        max-file: "2"
+    labels:
+    - traefik.enable=true
+    - traefik.http.routers.netbird-relay.rule=Host(`$NETBIRD_DOMAIN`) && PathPrefix(`/relay`)
+    - traefik.http.services.netbird-relay.loadbalancer.server.port=$NETBIRD_RELAY_PORT
+
   # Management
   management:
-    image: netbirdio/management:latest
+    image: netbirdio/management:$NETBIRD_MANAGEMENT_TAG
     restart: unless-stopped
     depends_on:
       - dashboard
@@ -81,12 +103,15 @@ services:
     - traefik.http.routers.netbird-management.service=netbird-management
     - traefik.http.services.netbird-management.loadbalancer.server.port=443
     - traefik.http.services.netbird-management.loadbalancer.server.scheme=h2c
-
+    environment:
+      - NETBIRD_STORE_ENGINE_POSTGRES_DSN=$NETBIRD_STORE_ENGINE_POSTGRES_DSN
+      - NETBIRD_STORE_ENGINE_MYSQL_DSN=$NETBIRD_STORE_ENGINE_MYSQL_DSN
+      
   # Coturn
   coturn:
-    image: coturn/coturn
+    image: coturn/coturn:$COTURN_TAG
     restart: unless-stopped
-    domainname: $NETBIRD_DOMAIN
+    domainname: $TURN_DOMAIN
     volumes:
       - ./turnserver.conf:/etc/turnserver.conf:ro
     #      - ./privkey.pem:/etc/coturn/private/privkey.pem:ro

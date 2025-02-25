@@ -19,6 +19,7 @@ If you haven't already, join our slack workspace [here](https://join.slack.com/t
     - [Development setup](#development-setup)
         - [Requirements](#requirements)
         - [Local NetBird setup](#local-netbird-setup)
+        - [Dev Container Support](#dev-container-support)
         - [Build and start](#build-and-start)
         - [Test suite](#test-suite)
     - [Checklist before submitting a PR](#checklist-before-submitting-a-pr)
@@ -95,7 +96,7 @@ They can be executed from the repository root before every push or PR:
 
 **Goreleaser**
 ```shell
-goreleaser --snapshot --rm-dist
+goreleaser build --snapshot --clean
 ```
 **golangci-lint**
 ```shell
@@ -135,6 +136,48 @@ checked out and set up:
    go mod tidy
    ```
 
+### Dev Container Support
+
+If you prefer using a dev container for development, NetBird now includes support for dev containers. 
+Dev containers provide a consistent and isolated development environment, making it easier for contributors to get started quickly. Follow the steps below to set up NetBird in a dev container.
+
+#### 1. Prerequisites:
+
+* Install Docker on your machine: [Docker Installation Guide](https://docs.docker.com/get-docker/)
+* Install Visual Studio Code: [VS Code Installation Guide](https://code.visualstudio.com/download)
+* If you prefer JetBrains Goland please follow this [manual](https://www.jetbrains.com/help/go/connect-to-devcontainer.html)
+
+#### 2. Clone the Repository:
+
+Clone the repository following previous [Local NetBird setup](#local-netbird-setup).
+
+#### 3. Open in project in IDE of your choice:
+
+**VScode**:
+
+Open the project folder in Visual Studio Code:
+
+```bash
+code .
+```
+
+When you open the project in VS Code, it will detect the presence of a dev container configuration.
+Click on the green "Reopen in Container" button in the bottom-right corner of VS Code.
+
+**Goland**:
+
+Open GoLand and select `"File" > "Open"` to open the NetBird project folder.
+GoLand will detect the dev container configuration and prompt you to open the project in the container. Accept the prompt.
+
+#### 4. Wait for the Container to Build:
+
+VsCode or GoLand will use the specified Docker image to build the dev container. This might take some time, depending on your internet connection.
+
+#### 6. Development:
+
+Once the container is built, you can start developing within the dev container. All the necessary dependencies and configurations are set up within the container.
+
+
 ### Build and start
 #### Client
 
@@ -145,6 +188,8 @@ CGO_ENABLED=0 go build .
 ```
 
 > Windows clients have a Wireguard driver requirement. You can download the wintun driver from https://www.wintun.net/builds/wintun-0.14.1.zip, after decompressing, you can copy the file `windtun\bin\ARCH\wintun.dll` to the same path as your binary file or to `C:\Windows\System32\wintun.dll`.
+
+> To test the client GUI application on Windows machines with RDP or vituralized environments (e.g. virtualbox or cloud), you need to download and extract the opengl32.dll from https://fdossena.com/?p=mesa/index.frag next to the built application.
 
 To start NetBird the client in the foreground:
 
@@ -228,6 +273,8 @@ cd netbird
 go test -exec sudo ./...
 ```
 > On Windows use a powershell with administrator privileges
+
+> Non-GTK environments will need the `libayatana-appindicator3-dev` (debian/ubuntu) package installed
 
 ## Checklist before submitting a PR
 As a critical network service and open-source project, we must enforce a few things before submitting the pull-requests:

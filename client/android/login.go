@@ -84,7 +84,7 @@ func (a *Auth) SaveConfigIfSSOSupported(listener SSOListener) {
 func (a *Auth) saveConfigIfSSOSupported() (bool, error) {
 	supportsSSO := true
 	err := a.withBackOff(a.ctx, func() (err error) {
-		_, err = internal.GetPKCEAuthorizationFlowInfo(a.ctx, a.config.PrivateKey, a.config.ManagementURL)
+		_, err = internal.GetPKCEAuthorizationFlowInfo(a.ctx, a.config.PrivateKey, a.config.ManagementURL, nil)
 		if s, ok := gstatus.FromError(err); ok && (s.Code() == codes.NotFound || s.Code() == codes.Unimplemented) {
 			_, err = internal.GetDeviceAuthorizationFlowInfo(a.ctx, a.config.PrivateKey, a.config.ManagementURL)
 			s, ok := gstatus.FromError(err)
@@ -162,7 +162,7 @@ func (a *Auth) login(urlOpener URLOpener) error {
 
 	// check if we need to generate JWT token
 	err := a.withBackOff(a.ctx, func() (err error) {
-		needsLogin, err = internal.IsLoginRequired(a.ctx, a.config.PrivateKey, a.config.ManagementURL, a.config.SSHKey)
+		needsLogin, err = internal.IsLoginRequired(a.ctx, a.config)
 		return
 	})
 	if err != nil {

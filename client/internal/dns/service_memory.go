@@ -2,7 +2,6 @@ package dns
 
 import (
 	"fmt"
-	"math/big"
 	"net"
 	"sync"
 
@@ -10,9 +9,11 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
+
+	nbnet "github.com/netbirdio/netbird/util/net"
 )
 
-type serviceViaMemory struct {
+type ServiceViaMemory struct {
 	wgInterface       WGIface
 	dnsMux            *dns.ServeMux
 	runtimeIP         string
@@ -22,18 +23,18 @@ type serviceViaMemory struct {
 	listenerFlagLock  sync.Mutex
 }
 
-func newServiceViaMemory(wgIface WGIface) *serviceViaMemory {
-	s := &serviceViaMemory{
+func NewServiceViaMemory(wgIface WGIface) *ServiceViaMemory {
+	s := &ServiceViaMemory{
 		wgInterface: wgIface,
 		dnsMux:      dns.NewServeMux(),
 
-		runtimeIP:   getLastIPFromNetwork(wgIface.Address().Network, 1),
+		runtimeIP:   nbnet.GetLastIPFromNetwork(wgIface.Address().Network, 1).String(),
 		runtimePort: defaultPort,
 	}
 	return s
 }
 
-func (s *serviceViaMemory) Listen() error {
+func (s *ServiceViaMemory) Listen() error {
 	s.listenerFlagLock.Lock()
 	defer s.listenerFlagLock.Unlock()
 
@@ -44,7 +45,7 @@ func (s *serviceViaMemory) Listen() error {
 	var err error
 	s.udpFilterHookID, err = s.filterDNSTraffic()
 	if err != nil {
-		return err
+		return fmt.Errorf("filter dns traffice: %w", err)
 	}
 	s.listenerIsRunning = true
 
@@ -52,7 +53,7 @@ func (s *serviceViaMemory) Listen() error {
 	return nil
 }
 
-func (s *serviceViaMemory) Stop() {
+func (s *ServiceViaMemory) Stop() {
 	s.listenerFlagLock.Lock()
 	defer s.listenerFlagLock.Unlock()
 
@@ -67,23 +68,23 @@ func (s *serviceViaMemory) Stop() {
 	s.listenerIsRunning = false
 }
 
-func (s *serviceViaMemory) RegisterMux(pattern string, handler dns.Handler) {
+func (s *ServiceViaMemory) RegisterMux(pattern string, handler dns.Handler) {
 	s.dnsMux.Handle(pattern, handler)
 }
 
-func (s *serviceViaMemory) DeregisterMux(pattern string) {
+func (s *ServiceViaMemory) DeregisterMux(pattern string) {
 	s.dnsMux.HandleRemove(pattern)
 }
 
-func (s *serviceViaMemory) RuntimePort() int {
+func (s *ServiceViaMemory) RuntimePort() int {
 	return s.runtimePort
 }
 
-func (s *serviceViaMemory) RuntimeIP() string {
+func (s *ServiceViaMemory) RuntimeIP() string {
 	return s.runtimeIP
 }
 
-func (s *serviceViaMemory) filterDNSTraffic() (string, error) {
+func (s *ServiceViaMemory) filterDNSTraffic() (string, error) {
 	filter := s.wgInterface.GetFilter()
 	if filter == nil {
 		return "", fmt.Errorf("can't set DNS filter, filter not initialized")
@@ -117,23 +118,4 @@ func (s *serviceViaMemory) filterDNSTraffic() (string, error) {
 	}
 
 	return filter.AddUDPPacketHook(false, net.ParseIP(s.runtimeIP), uint16(s.runtimePort), hook), nil
-}
-
-func getLastIPFromNetwork(network *net.IPNet, fromEnd int) string {
-	// Calculate the last IP in the CIDR range
-	var endIP net.IP
-	for i := 0; i < len(network.IP); i++ {
-		endIP = append(endIP, network.IP[i]|^network.Mask[i])
-	}
-
-	// convert to big.Int
-	endInt := big.NewInt(0)
-	endInt.SetBytes(endIP)
-
-	// subtract fromEnd from the last ip
-	fromEndBig := big.NewInt(int64(fromEnd))
-	resultInt := big.NewInt(0)
-	resultInt.Sub(endInt, fromEndBig)
-
-	return net.IP(resultInt.Bytes()).String()
 }
